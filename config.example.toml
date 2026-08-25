@@ -1,0 +1,78 @@
+# napalm-tools configuration.
+#
+# Copy to ~/.config/napalm-tools/config.toml and edit. Every setting here has a
+# matching command-line flag, and the flag always wins.
+#
+# `nt bundles` shows the catalog and each bundle's effective state on this
+# machine; `nt config show` shows the fully resolved configuration.
+
+# --- Bundles ---------------------------------------------------------------
+# A name not in the catalog is an error, not a silent no-op.
+
+[bundles]
+core           = true    # terminal and git essentials
+shell          = true    # shellcheck, shfmt
+security       = true    # trivy, gitleaks, osv-scanner, semgrep, syft, grype, hadolint
+ai             = true    # Claude Code, Copilot, Codex, Antigravity
+
+# Language tooling: linters, type checkers and vulnerability scanners.
+go             = false
+rust           = false
+python         = false
+node           = false
+web            = false
+data           = false
+
+# Language runtimes, kept separate: mise manages runtimes where it is in use,
+# and two things managing one runtime means PATH order decides the winner.
+go-runtime     = false
+rust-runtime   = false
+python-runtime = false
+node-runtime   = false
+
+aws            = false   # awscli, aws-sam-cli, cfn-lint
+desktop        = false   # flatpak applications and desktop helpers
+fonts          = false   # Nerd Fonts and programming typefaces
+
+# --- Extra packages --------------------------------------------------------
+# The escape hatch: packages outside the catalog, named per manager. Unlike
+# catalog packages these have no fallback, so the manager must be usable here.
+# Managers: brew, brew-cask, npm, bun, flatpak, dnf
+
+[extra]
+brew = ["jless", "dust"]
+
+# --- Run options -----------------------------------------------------------
+
+[options]
+# Also upgrade packages already installed. Off by default so a routine run
+# stays fast and never pulls a breaking update at an awkward moment.
+upgrade = false
+
+# Exit non-zero when a package has no provider on this host. Useful in CI.
+strict = false
+
+# --- Dotfiles --------------------------------------------------------------
+# Runs after packages converge, so chezmoi itself can come from the catalog on
+# a fresh machine.
+
+[dotfiles]
+enabled = true
+repo    = "https://github.com/napalm255/dotfiles"
+apply   = true
+
+# --- Per-host overrides ----------------------------------------------------
+# Each key is a glob matched against the machine's hostname (the full FQDN).
+# Tables apply in FILE ORDER and later matches win, so write them general
+# first, specific last. There is no hidden specificity ranking: what you read
+# top to bottom is what happens.
+
+[host."*.naponline.net"]
+bundles = { desktop = true, fonts = true, go = true, rust = true, python = true }
+
+[host."wsl-*"]
+bundles = { desktop = false, fonts = false }
+
+[host."build-*"]
+bundles  = { ai = false }
+dotfiles = { enabled = false }
