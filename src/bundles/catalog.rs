@@ -158,6 +158,57 @@ static CORE: &[Pkg] = &[
         providers: &[Provider::new(ManagerId::Brew, "btop")],
     },
     Pkg {
+        name: "wget",
+        binary: Some("wget"),
+        providers: &[Provider::new(ManagerId::Brew, "wget")],
+    },
+    Pkg {
+        name: "curl",
+        binary: Some("curl"),
+        providers: &[Provider::new(ManagerId::Brew, "curl")],
+    },
+    Pkg {
+        name: "make",
+        binary: Some("make"),
+        providers: &[Provider::new(ManagerId::Brew, "make")],
+    },
+    Pkg {
+        name: "man-db",
+        binary: Some("man"),
+        providers: &[Provider::new(ManagerId::Brew, "man-db")],
+    },
+    Pkg {
+        name: "whois",
+        binary: Some("whois"),
+        providers: &[Provider::new(ManagerId::Brew, "whois")],
+    },
+    Pkg {
+        name: "nmap",
+        binary: Some("nmap"),
+        providers: &[Provider::new(ManagerId::Brew, "nmap")],
+    },
+    // GNU inetutils supplies telnet. The standalone `telnet` formula is a
+    // port of Apple's remote_cmds with no bottle, so it would build from
+    // source on Linux.
+    Pkg {
+        name: "telnet",
+        binary: Some("telnet"),
+        providers: &[Provider::new(ManagerId::Brew, "inetutils")],
+    },
+    // No maintained user-space provider: the `netcat` formula is GNU netcat
+    // 0.7.1, released in 2004 and dormant since. Distributions ship a current
+    // one, so this resolves through the binary check on any ordinary system
+    // and falls back to dnf where that is usable.
+    Pkg {
+        name: "netcat",
+        binary: Some("nc"),
+        providers: &[Provider::gated(
+            ManagerId::Dnf,
+            "netcat",
+            Platforms::NOT_ATOMIC,
+        )],
+    },
+    Pkg {
         name: "tmux",
         binary: Some("tmux"),
         providers: &[Provider::new(ManagerId::Brew, "tmux")],
