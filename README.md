@@ -79,7 +79,7 @@ Dry run - no changes will be made.
   + bash -c 'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | NONINTERACTIVE=1 bash'
   + brew install mise
 
-⬇️  Steps (61 packages to install):
+⬇️ Steps (61 packages to install):
   + flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
   + brew tap powertmux/powertmux
   + brew trust --tap powertmux/powertmux

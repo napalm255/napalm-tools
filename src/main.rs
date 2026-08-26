@@ -230,10 +230,11 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             // Phase 3: converge, or show what converging would do.
             let mut failed = false;
             if dry_run {
+                ui.line("Dry run - no changes will be made.");
                 ui.data(&if json_mode {
                     json::to_string(&json::plan_view(&built, &platform, true))
                 } else {
-                    report::render_plan(&built, true, ui.theme())
+                    report::render_plan(&built, ui.theme())
                 });
             } else {
                 let report = if built.is_empty() {
@@ -253,15 +254,20 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 } else {
                     if built.is_empty() {
                         ui.data(&format!(
-                            "{} {}\n",
-                            ui.theme().satisfied_icon(),
-                            ui.theme().good.apply_to("Nothing to do.")
+                            "{}\n",
+                            ui.theme().with_icon(
+                                &ui.theme().satisfied_icon(),
+                                &ui.theme().good.apply_to("Nothing to do.").to_string()
+                            )
                         ));
                     }
                     ui.summary(&report);
                     // Notes are shown whether or not anything ran, so an
                     // unprovisionable package is never silently dropped.
-                    ui.data(&report::render_notes(&built, ui.theme()));
+                    let notes = report::render_notes(&built, ui.theme());
+                    if !notes.is_empty() {
+                        ui.data(&format!("\n{notes}"));
+                    }
                 }
             }
 

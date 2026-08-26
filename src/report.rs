@@ -20,24 +20,35 @@ fn pad(styled: &str, width: usize) -> String {
     format!("{styled}{}", " ".repeat(width.saturating_sub(visible)))
 }
 
-/// Render a plan for display.
-pub fn render_plan(plan: &ActionPlan, dry_run: bool, theme: &Theme) -> String {
-    let mut out = String::new();
+/// Width of the bundle-name column: the longest catalog name, so a new
+/// bundle widens the column instead of breaking the alignment.
+fn bundle_width() -> usize {
+    widest(BUNDLES.iter().map(|b| b.name))
+}
 
-    if dry_run {
-        let _ = writeln!(
-            out,
-            "{}",
-            theme.dim.apply_to("Dry run - no changes will be made.")
-        );
-    }
+/// Width of the state column in the catalog listing.
+const STATE_WIDTH: usize = "n/a here".len();
+
+/// The longest of `names`, as a column width.
+fn widest<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names.map(str::len).max().unwrap_or(0)
+}
+
+/// Render a plan for display.
+///
+/// The "dry run" advisory is not part of this: it is commentary, and goes
+/// to stderr, so `--output plain > plan.txt` holds only the plan.
+pub fn render_plan(plan: &ActionPlan, theme: &Theme) -> String {
+    let mut out = String::new();
 
     if plan.is_empty() {
         let _ = writeln!(
             out,
-            "{} {}",
-            theme.satisfied_icon(),
-            theme.good.apply_to("Nothing to do.")
+            "{}",
+            theme.with_icon(
+                &theme.satisfied_icon(),
+                &theme.good.apply_to("Nothing to do.").to_string()
+            )
         );
     } else {
         if !plan.bootstrap.is_empty() {
@@ -85,7 +96,11 @@ pub fn render_plan(plan: &ActionPlan, dry_run: bool, theme: &Theme) -> String {
         }
     }
 
-    out.push_str(&render_notes(plan, theme));
+    let notes = render_notes(plan, theme);
+    if !notes.is_empty() {
+        out.push('\n');
+        out.push_str(&notes);
+    }
     out
 }
 
@@ -100,7 +115,7 @@ pub fn render_notes(plan: &ActionPlan, theme: &Theme) -> String {
     if !plan.skipped.is_empty() {
         let _ = writeln!(
             out,
-            "\n{}",
+            "{}",
             theme.heading_line(&theme.skip_icon(), "Skipped:")
         );
         for s in &plan.skipped {
@@ -116,9 +131,12 @@ pub fn render_notes(plan: &ActionPlan, theme: &Theme) -> String {
 
     let unavailable = plan.unavailable();
     if !unavailable.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
         let _ = writeln!(
             out,
-            "\n{}",
+            "{}",
             theme.heading_line(&theme.warn_icon(), "Unavailable:")
         );
         for u in &unavailable {
@@ -140,16 +158,16 @@ pub fn render_notes(plan: &ActionPlan, theme: &Theme) -> String {
 fn bundle_line(b: &Bundle, resolved: &Resolved, platform: &Platform, theme: &Theme) -> String {
     let enabled = resolved.bundle_enabled(b.name);
     let rejection = b.platforms.rejection(platform);
-    let (state, styled) = match (enabled, rejection) {
-        (true, None) => ("on", theme.good.apply_to("on").to_string()),
-        (true, Some(_)) => ("n/a here", theme.warn.apply_to("n/a here").to_string()),
-        (false, _) => ("off", theme.dim.apply_to("off").to_string()),
+    let styled = match (enabled, rejection) {
+        (true, None) => theme.good.apply_to("on").to_string(),
+        (true, Some(_)) => theme.warn.apply_to("n/a here").to_string(),
+        (false, _) => theme.dim.apply_to("off").to_string(),
     };
     let count = b.wanted(&resolved.prompt).count();
     format!(
         "{} {} {} {}",
-        pad(&theme.name.apply_to(b.name).to_string(), 12),
-        pad(&styled, state.len().max(9)),
+        pad(&theme.name.apply_to(b.name).to_string(), bundle_width()),
+        pad(&styled, STATE_WIDTH),
         b.description,
         theme.dim.apply_to(format!(
             "({count} package{})",
@@ -171,6 +189,12 @@ pub fn render_bundles(
         out,
         "{}",
         theme.heading_line(&theme.bundle_icon(), "Bundles")
+    );
+    let package_width = widest(
+        BUNDLES
+            .iter()
+            .flat_map(|b| b.wanted(&resolved.prompt))
+            .map(|p| p.name),
     );
     for b in BUNDLES {
         let _ = writeln!(out, "{}", bundle_line(b, resolved, platform, theme));
@@ -194,7 +218,7 @@ pub fn render_bundles(
                 let _ = writeln!(
                     out,
                     "    {} {}",
-                    pad(&theme.name.apply_to(pkg.name).to_string(), 22),
+                    pad(&theme.name.apply_to(pkg.name).to_string(), package_width),
                     theme.dim.apply_to(providers.join(", "))
                 );
             }
@@ -293,6 +317,7 @@ pub fn render_status(
         theme.heading_line(&theme.bundle_icon(), "Bundles")
     );
 
+    let package_width = widest(plan.packages.iter().map(|p| p.name.as_str()));
     let mut total = Tally::default();
     for (bundle, t) in tally(plan) {
         total.present += t.present;
@@ -323,7 +348,7 @@ pub fn render_status(
         let _ = writeln!(
             out,
             "{} {}",
-            pad(&theme.name.apply_to(&bundle).to_string(), 12),
+            pad(&theme.name.apply_to(&bundle).to_string(), bundle_width()),
             parts.join(theme.dim.apply_to(", ").to_string().as_str())
         );
         if detail {
@@ -331,7 +356,7 @@ pub fn render_status(
                 let _ = writeln!(
                     out,
                     "    {} {}",
-                    pad(&theme.name.apply_to(&p.name).to_string(), 22),
+                    pad(&theme.name.apply_to(&p.name).to_string(), package_width),
                     state_text(p, theme)
                 );
             }
@@ -341,7 +366,7 @@ pub fn render_status(
         let _ = writeln!(
             out,
             "{} {}",
-            pad(&theme.name.apply_to(&s.name).to_string(), 12),
+            pad(&theme.name.apply_to(&s.name).to_string(), bundle_width()),
             theme.dim.apply_to(format!("skipped: {}", s.reason))
         );
     }
@@ -433,7 +458,7 @@ pub fn render_resolved(resolved: &Resolved, platform: &Platform, theme: &Theme) 
         let _ = writeln!(
             out,
             "  {} {styled}",
-            pad(&theme.name.apply_to(name).to_string(), 12)
+            pad(&theme.name.apply_to(name).to_string(), bundle_width())
         );
     }
     if !resolved.extra.is_empty() {
@@ -480,23 +505,18 @@ mod tests {
 
     #[test]
     fn an_empty_plan_says_there_is_nothing_to_do() {
-        let out = render_plan(&ActionPlan::default(), false, &Theme::plain());
+        let out = render_plan(&ActionPlan::default(), &Theme::plain());
 
         assert!(out.to_lowercase().contains("nothing to do"), "got: {out}");
     }
 
     #[test]
-    fn a_dry_run_is_labelled_and_a_real_run_is_not() {
-        assert!(
-            render_plan(&ActionPlan::default(), true, &Theme::plain())
-                .to_lowercase()
-                .contains("dry run")
-        );
-        assert!(
-            !render_plan(&ActionPlan::default(), false, &Theme::plain())
-                .to_lowercase()
-                .contains("dry run")
-        );
+    fn the_plan_carries_no_dry_run_advisory() {
+        // The advisory is commentary and belongs on stderr; the plan on
+        // stdout must be only the plan.
+        let out = render_plan(&ActionPlan::default(), &Theme::plain());
+
+        assert!(!out.to_lowercase().contains("dry run"), "got: {out}");
     }
 
     #[test]
@@ -506,7 +526,6 @@ mod tests {
                 manager: ManagerId::Brew,
                 packages: vec!["bat".into(), "fd".into()],
             }]),
-            true,
             &Theme::plain(),
         );
 
@@ -524,7 +543,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = render_plan(&plan, true, &Theme::plain());
+        let out = render_plan(&plan, &Theme::plain());
 
         assert!(out.contains("Bootstrap:"), "got: {out}");
         assert!(out.find("brew install mise") < out.find("brew install bat"));
@@ -541,7 +560,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = render_plan(&plan, true, &Theme::plain());
+        let out = render_plan(&plan, &Theme::plain());
 
         assert!(out.contains("xdotool"), "got: {out}");
         assert!(out.contains("no user-space provider"), "got: {out}");
@@ -559,7 +578,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = render_plan(&plan, true, &Theme::plain());
+        let out = render_plan(&plan, &Theme::plain());
 
         assert!(out.contains("desktop"), "got: {out}");
         assert!(out.contains("needs a desktop"), "got: {out}");
@@ -638,7 +657,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = render_plan(&plan, true, &Theme::plain());
+        let out = render_plan(&plan, &Theme::plain());
 
         assert!(out.contains("chezmoi apply"), "got: {out}");
         assert!(!out.to_lowercase().contains("nothing to do"), "{out}");
@@ -800,5 +819,35 @@ mod tests {
         let styled = t.name.apply_to("abc").to_string();
 
         assert_eq!(measure_text_width(&pad(&styled, 6)), 6);
+    }
+
+    #[test]
+    fn columns_are_as_wide_as_the_longest_name_and_no_wider() {
+        // Fixed widths broke alignment the day a longer name arrived; the
+        // widths now follow the catalog.
+        let longest = BUNDLES.iter().map(|b| b.name.len()).max().unwrap();
+        let resolved = resolved("");
+
+        let out = render_bundles(&resolved, &PLAIN, true, &Theme::plain());
+
+        for line in out
+            .lines()
+            .filter(|l| !l.starts_with(' ') && !l.starts_with("Bundles"))
+        {
+            let (name, rest) = line.split_at(line.find(' ').unwrap());
+            let state_starts = rest.len() - rest.trim_start().len();
+            assert_eq!(name.len() + state_starts, longest + 1, "{line:?}");
+        }
+        assert!(
+            out.lines().any(|l| l.contains("lua-language-server ")),
+            "the longest package name still gets one space"
+        );
+    }
+
+    #[test]
+    fn a_plain_theme_leaves_no_leading_space_where_an_icon_would_be() {
+        let out = render_plan(&ActionPlan::default(), &Theme::plain());
+
+        assert!(out.starts_with("Nothing to do."), "got: {out:?}");
     }
 }

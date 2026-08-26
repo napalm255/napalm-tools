@@ -52,8 +52,13 @@ impl Theme {
         }
     }
 
-    /// A colourful theme.
+    /// A colourful theme, with emoji if the terminal on stdout wants them.
     pub fn coloured() -> Theme {
+        Theme::coloured_with_emoji(console::Term::stdout().features().wants_emoji())
+    }
+
+    /// A colourful theme, with or without emoji.
+    pub fn coloured_with_emoji(emoji: bool) -> Theme {
         Theme {
             good: Style::new().green(),
             bad: Style::new().red().bold(),
@@ -63,18 +68,40 @@ impl Theme {
             name: Style::new().cyan(),
             manager: Style::new().blue(),
             coloured: true,
-            emoji: console::Term::stdout().features().wants_emoji(),
+            emoji,
         }
     }
 
-    /// The theme for a format, honouring the terminal and `NO_COLOR`.
+    /// The theme for the answer on stdout, honouring the terminal and
+    /// `NO_COLOR`.
     ///
     /// Only `Pretty` is ever decorated: `plain` and `json` are asked for
     /// precisely when the output is going somewhere that should not contain
     /// escapes.
     pub fn for_format(format: Format) -> Theme {
-        if format == Format::Pretty && console::colors_enabled() {
-            Theme::coloured()
+        Theme::for_stream(
+            format,
+            console::colors_enabled(),
+            console::Term::stdout().features().wants_emoji(),
+        )
+    }
+
+    /// The theme for everything on stderr, judged by stderr's own terminal:
+    /// `nt apply 2> run.log` must not fill the log with escapes just because
+    /// stdout is still a terminal.
+    pub fn for_stderr(format: Format) -> Theme {
+        Theme::for_stream(
+            format,
+            console::colors_enabled_stderr(),
+            console::Term::stderr().features().wants_emoji(),
+        )
+    }
+
+    /// The decision behind both: decorated only when the format allows it
+    /// and the stream in question wants colour.
+    pub fn for_stream(format: Format, colours: bool, emoji: bool) -> Theme {
+        if format == Format::Pretty && colours {
+            Theme::coloured_with_emoji(emoji)
         } else {
             Theme::plain()
         }
@@ -115,7 +142,7 @@ impl Theme {
 
     /// Heading icon for things that will be installed.
     pub fn install_icon(&self) -> String {
-        self.icon("⬇️ ", "")
+        self.icon("⬇️", "")
     }
 
     /// Heading icon for things already present.
@@ -125,12 +152,12 @@ impl Theme {
 
     /// Heading icon for things that cannot be provisioned.
     pub fn warn_icon(&self) -> String {
-        self.icon("⚠️ ", "")
+        self.icon("⚠️", "")
     }
 
     /// Heading icon for things skipped.
     pub fn skip_icon(&self) -> String {
-        self.icon("⏭️ ", "")
+        self.icon("⏭️", "")
     }
 
     /// Heading icon for a note from a manager.
@@ -145,7 +172,7 @@ impl Theme {
 
     /// Heading icon for the platform line.
     pub fn platform_icon(&self) -> String {
-        self.icon("🖥️ ", "")
+        self.icon("🖥️", "")
     }
 
     /// The marker for a package that is present.
@@ -171,12 +198,25 @@ impl Theme {
 
     /// A heading line: icon (if any), then bold text.
     pub fn heading_line(&self, icon: &str, text: &str) -> String {
+        self.with_icon(icon, &self.heading.apply_to(text).to_string())
+    }
+
+    /// `text` led by `icon` in its cell, or `text` alone when the icon is
+    /// empty, so a plain theme never leaves a stray leading space.
+    pub fn with_icon(&self, icon: &str, text: &str) -> String {
         if icon.is_empty() {
-            self.heading.apply_to(text).to_string()
+            text.to_string()
         } else {
-            format!("{icon} {}", self.heading.apply_to(text))
+            format!("{} {text}", icon_cell(icon))
         }
     }
+}
+
+/// An icon padded to a two-column cell, so headings line up whether the
+/// glyph is a double-width emoji or a narrow variation-selector sequence.
+pub fn icon_cell(icon: &str) -> String {
+    let width = console::measure_text_width(icon);
+    format!("{icon}{}", " ".repeat(2usize.saturating_sub(width)))
 }
 
 #[cfg(test)]
@@ -249,5 +289,57 @@ mod tests {
 
         assert_eq!(t.name.apply_to("ripgrep").to_string(), "ripgrep");
         assert_eq!(t.dim.apply_to("1.2s").to_string(), "1.2s");
+    }
+
+    #[test]
+    fn a_stream_that_does_not_want_colour_gets_a_plain_theme_even_when_pretty() {
+        // `nt apply 2> run.log` with stdout on a terminal: stderr's theme is
+        // judged by stderr, so the log stays free of escapes.
+        let t = Theme::for_stream(Format::Pretty, false, true);
+
+        assert!(!t.is_coloured());
+        assert!(!has_escapes(&t.heading_line(&t.install_icon(), "x")));
+    }
+
+    #[test]
+    fn a_pretty_stream_that_wants_colour_is_decorated_with_or_without_emoji() {
+        let with = Theme::for_stream(Format::Pretty, true, true);
+        let without = Theme::for_stream(Format::Pretty, true, false);
+
+        assert!(with.is_coloured() && without.is_coloured());
+        assert!(!with.bundle_icon().is_empty());
+        assert!(without.bundle_icon().is_empty());
+    }
+
+    #[test]
+    fn plain_and_json_are_never_decorated_whatever_the_stream_wants() {
+        for format in [Format::Plain, Format::Json] {
+            assert!(!Theme::for_stream(format, true, true).is_coloured());
+        }
+    }
+
+    #[test]
+    fn every_icon_fills_the_same_two_column_cell() {
+        // A double-width emoji and a variation-selector sequence must land
+        // the heading text in the same column.
+        let t = Theme::coloured_with_emoji(true);
+
+        for icon in [
+            t.bundle_icon(),
+            t.install_icon(),
+            t.satisfied_icon(),
+            t.warn_icon(),
+            t.skip_icon(),
+            t.note_icon(),
+            t.bootstrap_icon(),
+            t.platform_icon(),
+        ] {
+            assert_eq!(
+                console::measure_text_width(&icon_cell(&icon)),
+                2,
+                "{icon:?}"
+            );
+            assert!(!icon.ends_with(' '), "{icon:?} carries its own padding");
+        }
     }
 }

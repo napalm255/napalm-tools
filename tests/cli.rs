@@ -23,7 +23,12 @@ fn nt(config: &Path, os_release: &str, atomic: bool, container: bool, graphical:
     let exists = fixture("os-release-bluefin");
     let missing = PathBuf::from("/nonexistent/marker");
     let mut cmd = Command::cargo_bin("nt").unwrap();
-    cmd.env("NT_CONFIG", config)
+    // HOME is where the chezmoi source directory is looked for; pointing it
+    // at the config's own directory keeps the developer's dotfiles out of
+    // the plan. NT_TOOL_DIRS likewise hides the developer's tool installs.
+    cmd.env("HOME", config.parent().unwrap())
+        .env("NT_TOOL_DIRS", "")
+        .env("NT_CONFIG", config)
         .env("NT_HOSTNAME", "testhost.example.com")
         .env("NT_OS_RELEASE", fixture(os_release))
         .env("NT_OSTREE_MARKER", if atomic { &exists } else { &missing })
@@ -550,4 +555,22 @@ fn verbosity_is_accepted_without_changing_the_answer() {
     let loud = stdout(on_atomic(&cfg).args(["bundles", "-vv"]).assert().success());
 
     assert_eq!(quiet, loud);
+}
+
+#[test]
+fn the_dry_run_advisory_is_commentary_on_stderr_not_part_of_the_plan() {
+    // `nt apply --dry-run --output plain > plan.txt` must yield only the
+    // plan; the advisory is for the person watching.
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    let assert = on_atomic(&config)
+        .args(["apply", "--dry-run", "--output", "plain"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Dry run - no changes will be made.",
+        ));
+
+    assert!(!stdout(assert).contains("Dry run"));
 }

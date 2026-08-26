@@ -81,16 +81,15 @@ enum Sink {
 /// The single point through which `nt` speaks.
 pub struct Ui {
     format: Format,
+    /// Styles for the answer on stdout.
     theme: Theme,
+    /// Styles for everything on stderr, judged by stderr's own terminal.
+    err_theme: Theme,
     /// 0 captures subprocess output; 1 or more streams it through untouched.
     verbosity: u8,
     quiet: bool,
     sink: Sink,
     progress: progress::Progress,
-    /// Columns available for a live spinner line. A message wider than
-    /// this wraps, and clearing the spinner then leaves stale frames on the
-    /// rows above.
-    width: usize,
 }
 
 impl Ui {
@@ -104,11 +103,11 @@ impl Ui {
         Ui {
             format,
             theme: Theme::for_format(format),
+            err_theme: Theme::for_stderr(format),
             verbosity,
             quiet,
             sink: Sink::Std,
             progress: progress::Progress::new(live),
-            width: console::Term::stderr().size().1 as usize,
         }
     }
 
@@ -124,11 +123,11 @@ impl Ui {
             format,
             // Captured output is asserted on, so never decorated.
             theme: Theme::plain(),
+            err_theme: Theme::plain(),
             verbosity: 0,
             quiet,
             sink: Sink::Capture(Arc::clone(&buf)),
             progress: progress::Progress::disabled(),
-            width: 80,
         };
         (ui, buf)
     }
@@ -143,9 +142,24 @@ impl Ui {
         self.format
     }
 
-    /// The styles to render human-facing output with.
+    /// The styles to render the answer on stdout with.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// The styles for stderr.
+    fn err_theme(&self) -> &Theme {
+        &self.err_theme
+    }
+
+    /// Columns available for a live spinner line, read afresh each time so
+    /// a resize mid-run is honoured. A message wider than this wraps, and
+    /// clearing the spinner then leaves stale frames on the rows above.
+    fn width(&self) -> usize {
+        match self.sink {
+            Sink::Std => console::Term::stderr().size().1 as usize,
+            Sink::Capture(_) => 80,
+        }
     }
 
     /// Write the answer to stdout, exactly as given.
@@ -179,20 +193,27 @@ impl Ui {
         if self.quiet || self.format == Format::Json {
             return;
         }
-        self.write_err(&format!("{} {msg}\n", self.theme.warn.apply_to("warning:")));
+        self.write_err(&format!(
+            "{} {msg}\n",
+            self.err_theme.warn.apply_to("warning:")
+        ));
     }
 
     /// Write an error to stderr.
     ///
     /// Never suppressed: a failure must not be silent in any mode.
     pub fn error(&self, msg: &str) {
-        self.write_err(&format!("{} {msg}\n", self.theme.bad.apply_to("error:")));
+        self.write_err(&format!(
+            "{} {msg}\n",
+            self.err_theme.bad.apply_to("error:")
+        ));
     }
 
     /// Fit a live message into the terminal so the spinner never wraps.
-    /// The spinner's own prefix (`  ⠋ `) takes four columns.
+    /// The spinner's own prefix (`  ⠋ `) takes four columns, and the last
+    /// column is left alone so the cursor never wraps either.
     pub fn live(&self, message: &str) -> String {
-        truncate(message, self.width.saturating_sub(5).max(10))
+        truncate(message, self.width().saturating_sub(5).max(10))
     }
 
     /// Begin an open-ended activity with no step number - checking, probing,
@@ -226,9 +247,9 @@ impl Ui {
         if bar.is_none() && !self.silent_steps() {
             self.write_err(&format!(
                 "  {} {} {}\n",
-                self.theme.dim.apply_to("·"),
-                self.theme.dim.apply_to(format!("[{index}/{total}]")),
-                self.theme.name.apply_to(&label)
+                self.err_theme.dim.apply_to("·"),
+                self.err_theme.dim.apply_to(format!("[{index}/{total}]")),
+                self.err_theme.name.apply_to(&label)
             ));
         }
         Step {
@@ -257,7 +278,7 @@ impl Ui {
             }
             return;
         }
-        let t = &self.theme;
+        let t = &self.err_theme;
 
         if !report.steps.is_empty() {
             let mut line = format!(
@@ -379,7 +400,7 @@ impl Probe<'_> {
         if self.ui.silent_steps() {
             return;
         }
-        let theme = self.ui.theme();
+        let theme = self.ui.err_theme();
         self.ui.step_line(&format!(
             "  {} {} {}\n",
             theme.good.apply_to("·"),
@@ -431,7 +452,7 @@ impl Step<'_> {
 
         // Status first: a long command must never push the outcome out of
         // sight off the right edge.
-        let theme = self.ui.theme();
+        let theme = self.ui.err_theme();
         let mark = if success { theme.tick() } else { theme.cross() };
         let text = format!(
             "  {} {} {} {}\n",
@@ -450,12 +471,25 @@ impl Step<'_> {
     }
 }
 
-/// Shorten `text` to `max` characters, marking that it was cut.
+/// Shorten `text` to `max` terminal columns, marking that it was cut.
+///
+/// Measured in display width rather than characters: a double-width glyph
+/// in a package name would otherwise still wrap.
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if console::measure_text_width(text) <= max {
         return text.to_string();
     }
-    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    let room = max.saturating_sub(1);
+    let mut kept = String::new();
+    let mut width = 0;
+    for c in text.chars() {
+        let w = console::measure_text_width(c.encode_utf8(&mut [0; 4]));
+        if width + w > room {
+            break;
+        }
+        width += w;
+        kept.push(c);
+    }
     format!("{kept}\u{2026}")
 }
 
@@ -690,5 +724,15 @@ mod tests {
             "a failure must survive --quiet, got {:?}",
             err(&buf)
         );
+    }
+
+    #[test]
+    fn truncation_is_measured_in_columns_not_characters() {
+        // Two double-width glyphs take four columns; a five-column budget
+        // keeps only one of them plus the ellipsis.
+        assert_eq!(truncate("日本語", 5), "日本…");
+        assert_eq!(truncate("abc", 5), "abc");
+        assert_eq!(truncate("abcdef", 5), "abcd…");
+        assert_eq!(console::measure_text_width(&truncate("日本語です", 5)), 5);
     }
 }
