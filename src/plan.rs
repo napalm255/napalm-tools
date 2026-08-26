@@ -20,6 +20,8 @@ pub struct Snapshot {
     pub installed: BTreeMap<ManagerId, HashSet<String>>,
     /// Homebrew taps already configured.
     pub taps: HashSet<String>,
+    /// Homebrew taps already trusted, as recorded paths.
+    pub trusted_taps: HashSet<String>,
     /// Catalog-declared binaries that resolve on `PATH`.
     pub binaries: HashSet<String>,
 }
@@ -49,6 +51,13 @@ pub enum Action {
         /// Tap name.
         tap: String,
     },
+    /// Trust a tap, without which Homebrew ignores its formulae entirely.
+    Trust {
+        /// Manager the tap belongs to.
+        manager: ManagerId,
+        /// Tap name.
+        tap: String,
+    },
     /// Install packages that are missing.
     Install {
         /// Manager to install with.
@@ -70,6 +79,7 @@ impl Action {
     pub fn manager(&self) -> ManagerId {
         match self {
             Action::Tap { manager, .. }
+            | Action::Trust { manager, .. }
             | Action::Install { manager, .. }
             | Action::Upgrade { manager, .. } => *manager,
         }
@@ -82,6 +92,9 @@ impl Action {
             Action::Tap { tap, .. } => manager
                 .tap_cmd(tap)
                 .expect("tap actions are only produced for managers that support taps"),
+            Action::Trust { tap, .. } => manager
+                .trust_cmd(tap)
+                .expect("trust actions are only produced for managers that support them"),
             Action::Install { packages, .. } => manager.install_cmd(packages),
             Action::Upgrade { packages, .. } => manager.upgrade_cmd(packages),
         }
@@ -138,6 +151,7 @@ pub fn build(resolved: &Resolved, platform: &Platform, snapshot: &Snapshot) -> A
     let mut to_install: BTreeMap<ManagerId, Vec<String>> = BTreeMap::new();
     let mut to_upgrade: BTreeMap<ManagerId, Vec<String>> = BTreeMap::new();
     let mut taps: Vec<String> = Vec::new();
+    let mut trusts: Vec<String> = Vec::new();
 
     for bundle in BUNDLES {
         if !resolved.bundle_enabled(bundle.name) {
@@ -187,6 +201,14 @@ pub fn build(resolved: &Resolved, platform: &Platform, snapshot: &Snapshot) -> A
                 if !snapshot.taps.contains(tap) && !taps.iter().any(|t| t == tap) {
                     taps.push(tap.to_string());
                 }
+                // Separate from tapping: a tap can be present but untrusted,
+                // in which case Homebrew ignores its formulae and the install
+                // quietly does nothing.
+                if !crate::managers::brew::tap_is_trusted(tap, &snapshot.trusted_taps)
+                    && !trusts.iter().any(|t| t == tap)
+                {
+                    trusts.push(tap.to_string());
+                }
             }
             push_unique(to_install.entry(provider.manager).or_default(), provider.id);
         }
@@ -215,9 +237,15 @@ pub fn build(resolved: &Resolved, platform: &Platform, snapshot: &Snapshot) -> A
         }
     }
 
-    // Taps first, so an install from a new tap can succeed.
+    // Tap, then trust, then install: each is a precondition of the next.
     for tap in taps {
         plan.actions.push(Action::Tap {
+            manager: ManagerId::Brew,
+            tap,
+        });
+    }
+    for tap in trusts {
+        plan.actions.push(Action::Trust {
             manager: ManagerId::Brew,
             tap,
         });
@@ -338,6 +366,7 @@ mod tests {
             available: available.iter().copied().collect(),
             installed: BTreeMap::new(),
             taps: HashSet::new(),
+            trusted_taps: HashSet::new(),
             binaries: HashSet::new(),
         }
     }
@@ -454,11 +483,7 @@ mod tests {
         let plan = build(&all_bundles_on(), &ATOMIC, &snapshot(ManagerId::ALL));
 
         for action in &plan.actions {
-            let manager = match action {
-                Action::Tap { manager, .. }
-                | Action::Install { manager, .. }
-                | Action::Upgrade { manager, .. } => manager,
-            };
+            let manager = &action.manager();
             assert_ne!(*manager, ManagerId::Dnf, "planned a dnf action on atomic");
         }
     }
@@ -722,5 +747,81 @@ mod tests {
         let snap = snapshot(&[ManagerId::Brew]);
 
         assert!(!snap.has_binary(&pkg));
+    }
+
+    #[test]
+    fn an_untrusted_tap_gets_a_trust_action() {
+        // Homebrew ignores formulae from untrusted taps, so tapping alone
+        // leaves the install silently doing nothing.
+        let plan = build(
+            &only(&["core"]),
+            &PLAIN,
+            &snapshot(&[ManagerId::Brew, ManagerId::Npm]),
+        );
+
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, Action::Trust { tap, .. } if tap == "powertmux/powertmux")),
+            "expected a trust action, got {:?}",
+            plan.actions
+        );
+    }
+
+    #[test]
+    fn an_already_trusted_tap_is_not_trusted_again() {
+        let mut snap = snapshot(&[ManagerId::Brew, ManagerId::Npm]);
+        snap.trusted_taps
+            .insert("/home/x/Library/Taps/powertmux/homebrew-powertmux".to_string());
+
+        let plan = build(&only(&["core"]), &PLAIN, &snap);
+
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Trust { .. })),
+            "got {:?}",
+            plan.actions
+        );
+    }
+
+    #[test]
+    fn trust_comes_after_tapping_and_before_installing() {
+        let plan = build(
+            &only(&["core"]),
+            &PLAIN,
+            &snapshot(&[ManagerId::Brew, ManagerId::Npm]),
+        );
+
+        let at = |f: fn(&Action) -> bool| plan.actions.iter().position(f);
+        let tap = at(|a| matches!(a, Action::Tap { .. })).expect("tap");
+        let trust = at(|a| matches!(a, Action::Trust { .. })).expect("trust");
+        let install = at(|a| {
+            matches!(
+                a,
+                Action::Install {
+                    manager: ManagerId::Brew,
+                    ..
+                }
+            )
+        })
+        .expect("install");
+
+        assert!(tap < trust, "tap before trust");
+        assert!(trust < install, "trust before install");
+    }
+
+    #[test]
+    fn a_trust_action_renders_the_brew_command() {
+        let action = Action::Trust {
+            manager: ManagerId::Brew,
+            tap: "powertmux/powertmux".into(),
+        };
+
+        assert_eq!(
+            action.to_cmd().to_shell(),
+            "brew trust --tap powertmux/powertmux"
+        );
     }
 }

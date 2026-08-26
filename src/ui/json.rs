@@ -151,6 +151,7 @@ pub fn plan_view(plan: &ActionPlan, dry_run: bool) -> PlanView {
         .map(|a| {
             let (kind, packages) = match a {
                 Action::Tap { tap, .. } => ("tap", vec![tap.clone()]),
+                Action::Trust { tap, .. } => ("trust", vec![tap.clone()]),
                 Action::Install { packages, .. } => ("install", packages.clone()),
                 Action::Upgrade { packages, .. } => ("upgrade", packages.clone()),
             };

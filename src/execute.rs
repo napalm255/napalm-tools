@@ -36,8 +36,13 @@ pub struct RunReport {
 /// A manager that is unavailable here is skipped entirely, so no subprocess is
 /// spawned for it. One that is available but fails to answer is a hard error:
 /// planning against a half-known world would install things twice.
-pub fn snapshot(platform: &Platform) -> Result<Snapshot> {
+pub fn snapshot(platform: &Platform, ui: &Ui) -> Result<Snapshot> {
     let mut snap = Snapshot::default();
+    let usable: Vec<_> = managers::all()
+        .into_iter()
+        .filter(|m| m.available(platform))
+        .collect();
+    let probe = ui.probe("Checking installed packages");
 
     for manager in managers::all() {
         let id = manager.id();
@@ -45,6 +50,7 @@ pub fn snapshot(platform: &Platform) -> Result<Snapshot> {
             tracing::debug!(manager = %id, "not available on this host");
             continue;
         }
+        probe.detail(&format!("{id}"));
         snap.available.insert(id);
 
         let installed = manager
@@ -57,10 +63,18 @@ pub fn snapshot(platform: &Platform) -> Result<Snapshot> {
             snap.taps = manager
                 .installed_taps()
                 .with_context(|| format!("failed to list {id} taps"))?;
+            snap.trusted_taps = manager
+                .trusted_taps()
+                .with_context(|| format!("failed to list trusted {id} taps"))?;
         }
     }
 
     snap.binaries = binaries_on_path();
+    probe.finish(&format!(
+        "checked {} package manager{}",
+        usable.len(),
+        if usable.len() == 1 { "" } else { "s" }
+    ));
     Ok(snap)
 }
 

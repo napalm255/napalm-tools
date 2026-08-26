@@ -25,6 +25,41 @@ pub fn parse_taps(output: &str) -> HashSet<String> {
     super::parse_lines(output)
 }
 
+/// Parse `brew trust --json v1` into the set of trusted tap paths.
+pub fn parse_trusted(output: &str) -> HashSet<String> {
+    if output.trim().is_empty() {
+        return HashSet::new();
+    }
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("taps"))
+        .and_then(|t| t.as_array())
+        .map(|taps| {
+            taps.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `tap` (a `user/repo` name) appears in a set of trusted paths.
+///
+/// Trust is recorded as a filesystem path, not a tap name, and a tap may live
+/// outside Homebrew's own directory when it is a local checkout. Matching on
+/// the `homebrew-<repo>` component covers both. Two taps from different users
+/// sharing a repository name would collide; the cost of that is one idempotent
+/// `brew trust` that reports the tap is already trusted.
+pub fn tap_is_trusted(tap: &str, trusted: &HashSet<String>) -> bool {
+    let Some((_user, repo)) = tap.split_once('/') else {
+        return false;
+    };
+    let dir = format!("homebrew-{repo}");
+    trusted
+        .iter()
+        .any(|path| path.rsplit('/').next() == Some(dir.as_str()))
+}
+
 impl Brew {
     /// Explicitly-installed formulae, excluding those pulled in only as
     /// dependencies. Used for reporting, not for the installed-set diff:
@@ -71,6 +106,16 @@ impl Manager for Brew {
 
     fn tap_cmd(&self, tap: &str) -> Option<Cmd> {
         Some(Cmd::new("brew", ["tap", tap]))
+    }
+
+    fn trust_cmd(&self, tap: &str) -> Option<Cmd> {
+        Some(Cmd::new("brew", ["trust", "--tap", tap]))
+    }
+
+    fn trusted_taps(&self) -> Result<HashSet<String>> {
+        Ok(parse_trusted(
+            &Cmd::new("brew", ["trust", "--json", "v1"]).output()?,
+        ))
     }
 }
 
@@ -144,5 +189,69 @@ mod tests {
 
         assert!(Brew.platform_ok(&atomic));
         assert!(Brew.platform_ok(&wsl));
+    }
+
+    const TRUST_JSON: &str = r#"{
+      "taps": ["/var/home/napalm/git/homebrew-powertmux",
+               "/home/linuxbrew/.linuxbrew/Homebrew/Library/Taps/openclaw/homebrew-tap"],
+      "formulae": ["/var/home/napalm/git/homebrew-powertmux/powertmux"],
+      "casks": [],
+      "commands": []
+    }"#;
+
+    #[test]
+    fn trusted_taps_are_parsed_from_json() {
+        let set = parse_trusted(TRUST_JSON);
+
+        assert_eq!(set.len(), 2, "got {set:?}");
+        assert!(set.contains("/var/home/napalm/git/homebrew-powertmux"));
+    }
+
+    #[test]
+    fn only_taps_are_taken_not_formulae() {
+        // The formulae list holds paths too; conflating them would report a
+        // tap as trusted because one of its formulae is.
+        let set = parse_trusted(TRUST_JSON);
+
+        assert!(
+            !set.iter().any(|p| p.ends_with("/powertmux")),
+            "got {set:?}"
+        );
+    }
+
+    #[test]
+    fn empty_trust_output_is_an_empty_set() {
+        assert!(parse_trusted("").is_empty());
+        assert!(parse_trusted(r#"{"taps":[]}"#).is_empty());
+    }
+
+    #[test]
+    fn a_tap_in_homebrews_own_directory_is_recognised() {
+        let trusted = parse_trusted(TRUST_JSON);
+
+        assert!(tap_is_trusted("openclaw/tap", &trusted));
+    }
+
+    #[test]
+    fn a_local_checkout_tap_is_recognised_too() {
+        // This machine's powertmux tap points at ~/git/homebrew-powertmux,
+        // outside Homebrew's directory entirely.
+        let trusted = parse_trusted(TRUST_JSON);
+
+        assert!(tap_is_trusted("powertmux/powertmux", &trusted));
+    }
+
+    #[test]
+    fn an_untrusted_tap_is_not_recognised() {
+        let trusted = parse_trusted(TRUST_JSON);
+
+        assert!(!tap_is_trusted("someone/unrelated", &trusted));
+    }
+
+    #[test]
+    fn trusting_a_tap_uses_the_tap_flag() {
+        let cmd = Brew.trust_cmd("powertmux/powertmux").unwrap();
+
+        assert_eq!(cmd.to_shell(), "brew trust --tap powertmux/powertmux");
     }
 }

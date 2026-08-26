@@ -417,6 +417,20 @@ pub trait Manager {
     fn tap_cmd(&self, _tap: &str) -> Option<Cmd> {
         None
     }
+
+    /// Command to trust a tap.
+    ///
+    /// Homebrew requires third-party taps to be trusted before it will load
+    /// their formulae at all - an untrusted tap is silently ignored, so a
+    /// tapped package would appear to install and simply not.
+    fn trust_cmd(&self, _tap: &str) -> Option<Cmd> {
+        None
+    }
+
+    /// Taps already trusted, as recorded paths.
+    fn trusted_taps(&self) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
 }
 
 #[cfg(test)]
