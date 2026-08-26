@@ -438,7 +438,7 @@ installs on a default `nt apply`.
 
 ## Dependency vetting
 
-All 90 catalog packages and the project's own dependencies were checked
+All catalog packages and the project's own dependencies were checked
 against the project rules: at least 1000 GitHub stars, a commit within six
 months, not archived, compatible licence, with the first-party carve-out for
 tooling published by a language or platform owner.
@@ -452,6 +452,8 @@ tooling published by a language or platform owner.
 | `pup` | Original two years stale; the maintained DataDog fork has 994 stars, under the threshold. Replaced by `htmlq` |
 | `tree` | 323 stars, and an OS-native package - the ladder stops before Homebrew. `eza --tree` covers it |
 | `antigravity` (npm) | **Not Google's.** Version 0.0.0, description "placeholder for the haters", unrelated maintainer. A supply-chain hazard |
+| `netcat` (formula) | GNU netcat 0.7.1, released 2004 and dormant since. Distributions ship a current one, so the package resolves through the binary check and falls back to dnf |
+| `telnet` (formula) | A port of Apple's `remote_cmds` with no bottle at all, so it would build from source on Linux. GNU `inetutils` supplies telnet instead |
 
 ### Accepted exceptions
 
@@ -468,7 +470,7 @@ on a tool that is merely executed, never linked - `shellcheck` (GPL-3.0),
 
 ## Bundle taxonomy
 
-Seventeen bundles, ninety packages. `core`, `shell`, `security` and `ai` are
+Seventeen bundles, ninety-nine packages. `core`, `shell`, `security` and `ai` are
 on by default; everything else is opt-in. Language tooling is one bundle per
 language so a machine that never touches Go can skip that tooling entirely.
 Language **runtimes** are separate opt-in bundles, because `mise` manages
@@ -480,3 +482,19 @@ non-interactive, precise `file:line:col`, meaningful exit codes, single static
 binary. That filter is why `ruff`, `biome`, `oxlint` and `uv` are preferred
 over their predecessors, and why the interactive SQLite front-ends
 (`litecli`, `harlequin`, `visidata`, `dblab`) were considered and rejected.
+
+## Binary names are the catalog's silent failure mode
+
+A wrong `binary` is invisible: the package installs, the presence check never
+matches it, and `nt` reinstalls it whenever the owning manager happens not to
+report it. Nothing errors.
+
+`scripts/audit-binaries.py` (`just audit`) compares each declaration against
+the machine's real state and reports any package a manager calls installed
+whose declared binary is absent. It found one such case on first run: the
+`antigravity-cli` cask installs its binary as `agy`, because the cask artifact
+line reads `antigravity -> agy` - the file `antigravity` is installed *as*
+`agy`. Eighty-five other declarations were correct.
+
+The audit can only check what is currently installed, so it is a net rather
+than a proof.

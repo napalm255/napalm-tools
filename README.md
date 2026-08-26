@@ -104,7 +104,7 @@ while the cask `copilot-cli` is GitHub Copilot.
 
 ## Bundles
 
-Seventeen bundles, ninety packages. `core`, `shell`, `security` and `ai` are on
+Seventeen bundles, ninety-nine packages. `core`, `shell`, `security` and `ai` are on
 by default; everything else is opt-in.
 
 Language tooling is one bundle per language, so a machine that never touches Go
