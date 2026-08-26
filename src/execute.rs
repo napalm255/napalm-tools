@@ -139,7 +139,7 @@ fn binaries_on_path() -> HashSet<String> {
 pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
     let (bootstrap, actions, dotfiles) = plan.phases();
     let all: Vec<Cmd> = plan.commands();
-    prime_if_needed(&all, ui)?;
+    prime_if_needed(crate::privilege::plan_needs_privileges(plan), ui)?;
 
     let mut report = run_commands_numbered(&bootstrap, 0, all.len(), true, ui)?;
     if report.any_failed() {
@@ -168,15 +168,21 @@ pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
     Ok(report)
 }
 
-/// Ask for the sudo password up front if any command will need it and no
-/// credential is cached, so a refusal costs nothing and the prompt is the
-/// only thing on screen.
-fn prime_if_needed(commands: &[Cmd], ui: &Ui) -> Result<()> {
-    if commands.iter().any(|c| c.privileged) && !crate::privilege::already_authorised() {
+/// Ask for the sudo password up front if `needed` and no credential is
+/// cached, so a refusal costs nothing and the prompt is the only thing on
+/// screen.
+fn prime_if_needed(needed: bool, ui: &Ui) -> Result<()> {
+    if needed && !crate::privilege::already_authorised() {
         ui.line("Some steps need elevated privileges.");
         crate::privilege::prime()?;
     }
     Ok(())
+}
+
+/// Prime sudo if any of `commands` is privileged. Callers that know about
+/// later phases pass those commands too, so the one prompt covers the run.
+pub fn prime_for(commands: &[Cmd], ui: &Ui) -> Result<()> {
+    prime_if_needed(commands.iter().any(|c| c.privileged), ui)
 }
 
 /// Whether a failure looks like a command that wanted to ask a question.
@@ -207,7 +213,7 @@ pub fn looks_like_a_prompt_failure(tail: &str) -> bool {
 /// showing; under `-v` it streams through untouched. A command that cannot
 /// be started at all (missing program) is still an error.
 pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
-    prime_if_needed(commands, ui)?;
+    prime_for(commands, ui)?;
     run_commands_numbered(commands, 0, commands.len(), false, ui)
 }
 

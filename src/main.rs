@@ -185,12 +185,27 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
             refuse_root()?;
 
+            // The dotfiles step is planned first because its privilege need
+            // has to be known before anything runs: the one password prompt
+            // must precede the bootstrap, not land under its spinner.
+            let home = std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .context("HOME is not set; nt needs it to find the chezmoi source directory")?;
+            let source = dotfiles::source_dir(std::path::Path::new(&home));
+            let dotfiles = dotfiles::plan(
+                &resolved.dotfiles,
+                source.exists(),
+                privilege::scripts_use_sudo(&source),
+            )?;
+
             // Phase 1: bootstrap the managers themselves. A dry run only
             // plans it; a real run does it before the snapshot, so the
             // snapshot sees what it just made available.
             let (bootstrap, becomes_available) = plan::bootstrap(&platform, execute::probe());
             let assume: &[_] = if dry_run { &becomes_available } else { &[] };
             if !dry_run && !bootstrap.is_empty() {
+                let upcoming: Vec<_> = bootstrap.iter().chain(&dotfiles).cloned().collect();
+                execute::prime_for(&upcoming, ui)?;
                 ui.line("Bootstrapping package managers.");
                 let report = execute::run_commands(&bootstrap, ui)?;
                 if let Some(step) = report.steps.iter().find(|s| !s.success) {
@@ -208,16 +223,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             if dry_run {
                 built.bootstrap = bootstrap;
             }
-
-            let home = std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .context("HOME is not set; nt needs it to find the chezmoi source directory")?;
-            let source = dotfiles::source_dir(std::path::Path::new(&home));
-            built.dotfiles = dotfiles::plan(
-                &resolved.dotfiles,
-                source.exists(),
-                privilege::scripts_use_sudo(&source),
-            )?;
+            built.dotfiles = dotfiles;
 
             let json_mode = ui.format() == Format::Json;
 
