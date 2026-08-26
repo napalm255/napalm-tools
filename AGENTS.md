@@ -173,7 +173,9 @@ in `catalog.rs`.
 
 For tests and for exercising another platform's code path on this machine:
 `NT_CONFIG`, `NT_HOSTNAME`, `NT_OS_RELEASE`, `NT_OSTREE_MARKER`,
-`NT_CONTAINER_MARKER`, `NT_SESSION_DIR`, `NT_TOOL_DIRS`, `NT_FAKE_UID`.
+`NT_CONTAINER_MARKER`, `NT_SESSION_DIR`, `NT_TOOL_DIRS`. `NT_FAKE_UID=0` makes
+`apply` behave as if run by root, to test the refusal; it can only force root,
+never hide it.
 
 ## Style
 

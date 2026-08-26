@@ -106,30 +106,13 @@ fn config_path(matches: &ArgMatches) -> PathBuf {
 /// Refuse to provision as root. Homebrew refuses too, and a root-owned
 /// `~/.local` is a trap for every tool that comes after.
 fn refuse_root() -> Result<()> {
-    if is_root() {
+    if privilege::is_root() {
         bail!(
             "nt apply must run as an ordinary user, not root; \
              create a user with sudo access and run it there"
         );
     }
     Ok(())
-}
-
-/// Whether the effective user is root, read from `/proc` so no crate is
-/// needed for a single syscall's worth of information.
-fn is_root() -> bool {
-    std::env::var("NT_FAKE_UID")
-        .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/proc/self/status")
-                .ok()?
-                .lines()
-                .find(|l| l.starts_with("Uid:"))?
-                .split_whitespace()
-                .nth(2)
-                .map(str::to_string)
-        })
-        .is_some_and(|uid| uid == "0")
 }
 
 fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {

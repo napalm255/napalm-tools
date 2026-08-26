@@ -62,6 +62,35 @@ fn mentions_sudo(text: &str) -> bool {
         })
 }
 
+/// Whether the effective user is root.
+///
+/// Read from `/proc` so no crate is needed for a single syscall's worth of
+/// information. `NT_FAKE_UID=0` forces the answer to true so a test can
+/// exercise the refusal; it can never make a real root look like an ordinary
+/// user, because the guard exists to protect the machine from exactly the
+/// caller who controls the environment.
+pub fn is_root() -> bool {
+    let status = std::fs::read_to_string("/proc/self/status").ok();
+    is_root_from(
+        status.as_deref().and_then(uid_from_proc_status),
+        std::env::var("NT_FAKE_UID").ok().as_deref(),
+    )
+}
+
+/// The pure decision: root if the real uid is 0, or if the override forces it.
+fn is_root_from(real_uid: Option<&str>, forced: Option<&str>) -> bool {
+    real_uid == Some("0") || forced == Some("0")
+}
+
+/// The effective uid from the text of `/proc/self/status`: the third field
+/// of the `Uid:` line (real, effective, saved, filesystem).
+fn uid_from_proc_status(text: &str) -> Option<&str> {
+    text.lines()
+        .find(|l| l.starts_with("Uid:"))?
+        .split_whitespace()
+        .nth(2)
+}
+
 /// Whether sudo already holds a valid cached credential.
 pub fn already_authorised() -> bool {
     Cmd::new("sudo", ["-n", "true"])
@@ -242,5 +271,45 @@ mod tests {
     #[test]
     fn an_empty_plan_needs_nothing() {
         assert!(!plan_needs_privileges(&ActionPlan::default()));
+    }
+
+    const STATUS: &str =
+        "Name:\tnt\nUmask:\t0022\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
+
+    #[test]
+    fn the_effective_uid_is_the_second_number_on_the_uid_line() {
+        // A setuid binary has real 1000 but effective 0; the effective one
+        // is what decides who owns the files nt would create.
+        let text = STATUS.replace("Uid:\t1000\t1000", "Uid:\t1000\t0");
+
+        assert_eq!(uid_from_proc_status(&text), Some("0"));
+        assert_eq!(uid_from_proc_status(STATUS), Some("1000"));
+    }
+
+    #[test]
+    fn a_status_without_a_uid_line_yields_nothing() {
+        assert_eq!(uid_from_proc_status("Name:\tnt\n"), None);
+        assert_eq!(uid_from_proc_status(""), None);
+    }
+
+    #[test]
+    fn a_forced_root_uid_makes_an_ordinary_user_look_like_root() {
+        assert!(is_root_from(Some("1000"), Some("0")));
+    }
+
+    #[test]
+    fn a_fake_non_root_uid_cannot_hide_a_real_root() {
+        // The property the guard depends on: the environment can only
+        // tighten the check, never loosen it.
+        assert!(is_root_from(Some("0"), Some("1000")));
+        assert!(is_root_from(Some("0"), None));
+        assert!(is_root_from(Some("0"), Some("")));
+    }
+
+    #[test]
+    fn an_ordinary_user_without_an_override_is_not_root() {
+        assert!(!is_root_from(Some("1000"), None));
+        assert!(!is_root_from(None, None));
+        assert!(!is_root_from(Some("1000"), Some("1000")));
     }
 }
