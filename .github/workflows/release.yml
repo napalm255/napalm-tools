@@ -1,0 +1,38 @@
+name: release
+
+# Push a tag `vX.Y.Z` matching Cargo.toml's version. The whole CI workflow
+# runs first; only then is the archive built and attached to a GitHub
+# Release with notes generated from the commits since the previous tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # No caches here: a job that publishes must build from nothing it
+      # did not fetch itself, or a poisoned cache entry becomes a release.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
+        with:
+          cache: false
+      - run: just release-assets "$TAG"
+        env:
+          TAG: ${{ github.ref_name }}
+      - run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}

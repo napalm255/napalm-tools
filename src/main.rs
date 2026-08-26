@@ -106,30 +106,13 @@ fn config_path(matches: &ArgMatches) -> PathBuf {
 /// Refuse to provision as root. Homebrew refuses too, and a root-owned
 /// `~/.local` is a trap for every tool that comes after.
 fn refuse_root() -> Result<()> {
-    if is_root() {
+    if privilege::is_root() {
         bail!(
             "nt apply must run as an ordinary user, not root; \
              create a user with sudo access and run it there"
         );
     }
     Ok(())
-}
-
-/// Whether the effective user is root, read from `/proc` so no crate is
-/// needed for a single syscall's worth of information.
-fn is_root() -> bool {
-    std::env::var("NT_FAKE_UID")
-        .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/proc/self/status")
-                .ok()?
-                .lines()
-                .find(|l| l.starts_with("Uid:"))?
-                .split_whitespace()
-                .nth(2)
-                .map(str::to_string)
-        })
-        .is_some_and(|uid| uid == "0")
 }
 
 fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
@@ -202,14 +185,36 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
             refuse_root()?;
 
+            // The dotfiles step is planned first because its privilege need
+            // has to be known before anything runs: the one password prompt
+            // must precede the bootstrap, not land under its spinner.
+            let home = std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .context("HOME is not set; nt needs it to find the chezmoi source directory")?;
+            let source = dotfiles::source_dir(std::path::Path::new(&home));
+            let dotfiles = dotfiles::plan(
+                &resolved.dotfiles,
+                source.exists(),
+                privilege::scripts_use_sudo(&source),
+            )?;
+
             // Phase 1: bootstrap the managers themselves. A dry run only
             // plans it; a real run does it before the snapshot, so the
             // snapshot sees what it just made available.
             let (bootstrap, becomes_available) = plan::bootstrap(&platform, execute::probe());
             let assume: &[_] = if dry_run { &becomes_available } else { &[] };
             if !dry_run && !bootstrap.is_empty() {
+                let upcoming: Vec<_> = bootstrap.iter().chain(&dotfiles).cloned().collect();
+                execute::prime_for(&upcoming, ui)?;
                 ui.line("Bootstrapping package managers.");
-                execute::run_commands(&bootstrap, ui)?;
+                let report = execute::run_bootstrap(&bootstrap, ui)?;
+                if let Some(step) = report.steps.iter().find(|s| !s.success) {
+                    bail!(
+                        "bootstrap failed at `{}`:\n{}",
+                        step.command,
+                        step.tail.join("\n")
+                    );
+                }
             }
 
             // Phase 2: snapshot and plan.
@@ -218,25 +223,18 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             if dry_run {
                 built.bootstrap = bootstrap;
             }
-
-            let home = std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .context("HOME is not set; nt needs it to find the chezmoi source directory")?;
-            let source = dotfiles::source_dir(std::path::Path::new(&home));
-            built.dotfiles = dotfiles::plan(
-                &resolved.dotfiles,
-                source.exists(),
-                privilege::scripts_use_sudo(&source),
-            )?;
+            built.dotfiles = dotfiles;
 
             let json_mode = ui.format() == Format::Json;
 
             // Phase 3: converge, or show what converging would do.
+            let mut failed = false;
             if dry_run {
+                ui.line("Dry run - no changes will be made.");
                 ui.data(&if json_mode {
                     json::to_string(&json::plan_view(&built, &platform, true))
                 } else {
-                    report::render_plan(&built, true, ui.theme())
+                    report::render_plan(&built, ui.theme())
                 });
             } else {
                 let report = if built.is_empty() {
@@ -244,6 +242,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 } else {
                     execute::run(&built, ui)?
                 };
+                failed = report.any_failed();
 
                 if json_mode {
                     // One document carrying both what was planned and what
@@ -255,18 +254,26 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 } else {
                     if built.is_empty() {
                         ui.data(&format!(
-                            "{} {}\n",
-                            ui.theme().satisfied_icon(),
-                            ui.theme().good.apply_to("Nothing to do.")
+                            "{}\n",
+                            ui.theme().with_icon(
+                                &ui.theme().satisfied_icon(),
+                                &ui.theme().good.apply_to("Nothing to do.").to_string()
+                            )
                         ));
                     }
                     ui.summary(&report);
                     // Notes are shown whether or not anything ran, so an
                     // unprovisionable package is never silently dropped.
-                    ui.data(&report::render_notes(&built, ui.theme()));
+                    let notes = report::render_notes(&built, ui.theme());
+                    if !notes.is_empty() {
+                        ui.data(&format!("\n{notes}"));
+                    }
                 }
             }
 
+            if failed {
+                return Ok(ExitCode::FAILURE);
+            }
             if resolved.strict && !built.unavailable().is_empty() {
                 return Ok(ExitCode::from(EXIT_UNMET));
             }
@@ -290,4 +297,75 @@ fn resolve(
     let resolved = config::resolve(&file, &hostname, overrides)
         .with_context(|| format!("failed to resolve configuration from {}", path.display()))?;
     Ok((resolved, detected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matches(args: &[&str]) -> ArgMatches {
+        cli::command()
+            .try_get_matches_from(std::iter::once("nt").chain(args.iter().copied()))
+            .unwrap()
+    }
+
+    #[test]
+    fn leaf_returns_the_innermost_subcommand_where_the_flags_land() {
+        let m = matches(&["config", "show", "--output", "json"]);
+
+        let inner = leaf(&m);
+
+        assert_eq!(inner.get_one::<String>("output").unwrap(), "json");
+        assert!(inner.subcommand().is_none());
+        assert_eq!(m.subcommand_name(), Some("config"));
+    }
+
+    #[test]
+    fn format_honours_an_explicit_output_flag() {
+        for (flag, want) in [
+            ("json", Format::Json),
+            ("plain", Format::Plain),
+            ("pretty", Format::Pretty),
+        ] {
+            let m = matches(&["status", "--output", flag]);
+            assert_eq!(format_from(leaf(&m)), want);
+        }
+    }
+
+    #[test]
+    fn format_falls_back_to_detection_without_a_flag() {
+        let m = matches(&["status"]);
+
+        assert_eq!(format_from(leaf(&m)), Format::detect());
+    }
+
+    #[test]
+    fn verbosity_counts_repeated_flags_and_is_zero_where_undefined() {
+        assert_eq!(verbosity(leaf(&matches(&["status"]))), 0);
+        assert_eq!(verbosity(leaf(&matches(&["status", "-v"]))), 1);
+        assert_eq!(verbosity(leaf(&matches(&["apply", "-vvv"]))), 3);
+        // `version` defines no flags at all; asking must not fail.
+        assert_eq!(verbosity(leaf(&matches(&["version"]))), 0);
+    }
+
+    #[test]
+    fn quiet_and_detail_are_false_where_the_flag_is_not_defined() {
+        assert!(quiet(leaf(&matches(&["apply", "-q"]))));
+        assert!(!quiet(leaf(&matches(&["apply"]))));
+        assert!(!quiet(leaf(&matches(&["status"]))));
+        assert!(detail(leaf(&matches(&["bundles", "--detail"]))));
+        assert!(!detail(leaf(&matches(&["bundles"]))));
+        assert!(!detail(leaf(&matches(&["version"]))));
+    }
+
+    #[test]
+    fn the_config_flag_wins_over_the_default_path() {
+        let m = matches(&["config", "path", "--config", "/elsewhere/nt.toml"]);
+
+        assert_eq!(config_path(&m), PathBuf::from("/elsewhere/nt.toml"));
+        assert_eq!(
+            config_path(&matches(&["config", "path"])),
+            config::default_path()
+        );
+    }
 }

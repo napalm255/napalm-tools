@@ -29,4 +29,10 @@ ARG MISE_VERSION=v2026.8.13
 RUN curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION}" sh \
     && mise --version
 
+# rustup, with no toolchain: rust-toolchain.toml selects and installs the
+# pinned one on first use, so the image never carries a stale Rust.
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none \
+    && ~/.cargo/bin/rustup --version
+ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
+
 WORKDIR /workspaces/napalm-tools

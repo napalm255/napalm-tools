@@ -215,6 +215,17 @@ impl ActionPlan {
             .collect()
     }
 
+    /// The plan's commands by phase: bootstrap, package actions, dotfiles.
+    /// Bootstrap failure aborts everything after it; a package failure
+    /// skips the dotfiles, whose scripts may assume the packages exist.
+    pub fn phases(&self) -> (Vec<Cmd>, Vec<Cmd>, Vec<Cmd>) {
+        (
+            self.bootstrap.clone(),
+            self.actions.iter().map(Action::to_cmd).collect(),
+            self.dotfiles.clone(),
+        )
+    }
+
     /// Every command the plan would run, in order.
     pub fn commands(&self) -> Vec<Cmd> {
         self.bootstrap
@@ -432,13 +443,17 @@ pub fn bootstrap(platform: &Platform, probe: Probe) -> (Vec<Cmd>, Vec<ManagerId>
             );
         }
         // The official installer, run non-interactively. It uses sudo itself
-        // to create /home/linuxbrew, so the step keeps the terminal.
+        // to create /home/linuxbrew, so the step keeps the terminal. Without
+        // pipefail the pipeline's status is bash's, and bash reading nothing
+        // exits 0: a failed download would count as a successful bootstrap.
         cmds.push(
             Cmd::new(
                 "bash",
                 [
                     "-c",
-                    &format!("curl -fsSL {BREW_INSTALLER} | NONINTERACTIVE=1 bash"),
+                    &format!(
+                        "set -o pipefail; curl -fsSL {BREW_INSTALLER} | NONINTERACTIVE=1 bash"
+                    ),
                 ],
             )
             .privileged(),
@@ -851,6 +866,33 @@ mod tests {
     }
 
     #[test]
+    fn the_web_bundle_installs_chromium_through_playwright_when_absent() {
+        let plan = build(
+            &only(&["web"]),
+            &PLAIN,
+            &snapshot(&[ManagerId::Brew, ManagerId::Npm, ManagerId::Playwright]),
+        );
+
+        assert_eq!(
+            installs_for(&plan, ManagerId::Playwright).unwrap(),
+            vec!["chromium".to_string()]
+        );
+        assert!(
+            installs_for(&plan, ManagerId::Npm)
+                .unwrap()
+                .contains(&"playwright".to_string())
+        );
+
+        let mut snap = snapshot(&[ManagerId::Brew, ManagerId::Npm, ManagerId::Playwright]);
+        snap.installed.insert(
+            ManagerId::Playwright,
+            HashSet::from(["chromium".to_string()]),
+        );
+        let plan = build(&only(&["web"]), &PLAIN, &snap);
+        assert!(installs_for(&plan, ManagerId::Playwright).is_none());
+    }
+
+    #[test]
     fn only_the_selected_prompt_is_installed() {
         let mut toml = none_toml().replace("prompt = false", "prompt = true");
         toml.push_str("\n[shell]\nprompt = \"oh-my-posh\"\n");
@@ -1056,6 +1098,29 @@ mod tests {
                 vec![ManagerId::Brew, ManagerId::BrewCask, ManagerId::Mise]
             );
         }
+    }
+
+    #[test]
+    fn a_failed_installer_download_fails_the_bootstrap_step() {
+        // The installer is `curl | bash`; only pipefail lets curl's failure
+        // through, since bash exits 0 on empty input.
+        let probe = Probe {
+            brew: false,
+            mise: true,
+            sudo: false,
+        };
+
+        let (cmds, _) = bootstrap(&ATOMIC, probe);
+        let script = cmds[0].args[1].clone();
+
+        assert!(script.starts_with("set -o pipefail;"), "{script}");
+        assert!(script.contains("curl -fsSL"), "{script}");
+        // Prove the shape works: the same pipeline with a failing producer.
+        let status = std::process::Command::new("bash")
+            .args(["-c", "set -o pipefail; false | bash"])
+            .status()
+            .unwrap();
+        assert!(!status.success());
     }
 
     #[test]

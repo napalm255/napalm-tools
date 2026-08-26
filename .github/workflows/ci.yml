@@ -4,49 +4,78 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs this whole workflow before it publishes anything.
+  workflow_call:
+  # `gh workflow run ci --ref <branch>` when an event was missed.
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: lint, test, deny
+    name: lint, test, coverage, security
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          toolchain: 1.97.1
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - name: cargo-deny and cargo-audit
+          persist-credentials: false
+          # gitleaks scans history, not just the tip.
+          fetch-depth: 0
+      # rustup reads rust-toolchain.toml itself, so the pinned toolchain and
+      # its components are installed on the first cargo call; no action needed.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      # Every other tool comes from mise.toml, so CI and a developer's
+      # machine run identical versions.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
+        with:
+          cache: true
+      - run: just ci
+      - name: Coverage summary
+        if: always()
         run: |
-          cargo install --locked cargo-deny cargo-audit
-          cargo deny check
-          cargo audit
+          {
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: coverage-lcov
+          path: target/lcov.info
+          retention-days: 14
 
   e2e:
     name: e2e (${{ matrix.target }})
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         target: [fedora, bluefin]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - run: cargo build --release
       # The Bluefin image is large; free the runner's disk before pulling it.
       - if: matrix.target == 'bluefin'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-      - run: ./tests/e2e/run.sh ${{ matrix.target }}
+      # Rootful podman: inside a rootless container on the runner, sudo's
+      # PAM account stage fails ("cannot retrieve authentication info").
+      - run: ./tests/e2e/run.sh "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+          E2E_PODMAN: sudo podman

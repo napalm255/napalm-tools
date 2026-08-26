@@ -1,3 +1,5 @@
 /target
 /completions
+/dist
 /.ruff_cache
+*.profraw

@@ -7,6 +7,7 @@ pub mod dnf;
 pub mod flatpak;
 pub mod mise;
 pub mod npm;
+pub mod playwright;
 
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -32,6 +33,9 @@ pub enum ManagerId {
     Flatpak,
     /// mise, for language toolchains. Ids are `tool@version`.
     Mise,
+    /// Playwright's browser store: a user-space Chromium shared by every
+    /// tool that needs one.
+    Playwright,
     /// dnf. Never available on ostree-based systems.
     Dnf,
 }
@@ -45,6 +49,7 @@ impl ManagerId {
         ManagerId::Bun,
         ManagerId::Flatpak,
         ManagerId::Mise,
+        ManagerId::Playwright,
         ManagerId::Dnf,
     ];
 
@@ -57,6 +62,7 @@ impl ManagerId {
             ManagerId::Bun => "bun",
             ManagerId::Flatpak => "flatpak",
             ManagerId::Mise => "mise",
+            ManagerId::Playwright => "playwright",
             ManagerId::Dnf => "dnf",
         }
     }
@@ -336,6 +342,7 @@ pub fn get(id: ManagerId) -> Box<dyn Manager> {
         ManagerId::Bun => Box::new(bun::Bun),
         ManagerId::Flatpak => Box::new(flatpak::Flatpak),
         ManagerId::Mise => Box::new(mise::Mise),
+        ManagerId::Playwright => Box::new(playwright::Playwright),
         ManagerId::Dnf => Box::new(dnf::Dnf),
     }
 }
