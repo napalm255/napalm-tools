@@ -298,3 +298,74 @@ fn resolve(
         .with_context(|| format!("failed to resolve configuration from {}", path.display()))?;
     Ok((resolved, detected))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matches(args: &[&str]) -> ArgMatches {
+        cli::command()
+            .try_get_matches_from(std::iter::once("nt").chain(args.iter().copied()))
+            .unwrap()
+    }
+
+    #[test]
+    fn leaf_returns_the_innermost_subcommand_where_the_flags_land() {
+        let m = matches(&["config", "show", "--output", "json"]);
+
+        let inner = leaf(&m);
+
+        assert_eq!(inner.get_one::<String>("output").unwrap(), "json");
+        assert!(inner.subcommand().is_none());
+        assert_eq!(m.subcommand_name(), Some("config"));
+    }
+
+    #[test]
+    fn format_honours_an_explicit_output_flag() {
+        for (flag, want) in [
+            ("json", Format::Json),
+            ("plain", Format::Plain),
+            ("pretty", Format::Pretty),
+        ] {
+            let m = matches(&["status", "--output", flag]);
+            assert_eq!(format_from(leaf(&m)), want);
+        }
+    }
+
+    #[test]
+    fn format_falls_back_to_detection_without_a_flag() {
+        let m = matches(&["status"]);
+
+        assert_eq!(format_from(leaf(&m)), Format::detect());
+    }
+
+    #[test]
+    fn verbosity_counts_repeated_flags_and_is_zero_where_undefined() {
+        assert_eq!(verbosity(leaf(&matches(&["status"]))), 0);
+        assert_eq!(verbosity(leaf(&matches(&["status", "-v"]))), 1);
+        assert_eq!(verbosity(leaf(&matches(&["apply", "-vvv"]))), 3);
+        // `version` defines no flags at all; asking must not fail.
+        assert_eq!(verbosity(leaf(&matches(&["version"]))), 0);
+    }
+
+    #[test]
+    fn quiet_and_detail_are_false_where_the_flag_is_not_defined() {
+        assert!(quiet(leaf(&matches(&["apply", "-q"]))));
+        assert!(!quiet(leaf(&matches(&["apply"]))));
+        assert!(!quiet(leaf(&matches(&["status"]))));
+        assert!(detail(leaf(&matches(&["bundles", "--detail"]))));
+        assert!(!detail(leaf(&matches(&["bundles"]))));
+        assert!(!detail(leaf(&matches(&["version"]))));
+    }
+
+    #[test]
+    fn the_config_flag_wins_over_the_default_path() {
+        let m = matches(&["config", "path", "--config", "/elsewhere/nt.toml"]);
+
+        assert_eq!(config_path(&m), PathBuf::from("/elsewhere/nt.toml"));
+        assert_eq!(
+            config_path(&matches(&["config", "path"])),
+            config::default_path()
+        );
+    }
+}

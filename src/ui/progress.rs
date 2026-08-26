@@ -58,12 +58,24 @@ mod tests {
     }
 
     #[test]
-    fn a_pretty_progress_produces_a_spinner_without_panicking() {
-        // Exercised for absence of panic; its rendering is not asserted on.
+    fn a_live_progress_produces_a_ticking_spinner_carrying_the_message() {
         let p = Progress::new(true);
-        if let Some(bar) = p.spinner("working".into()) {
-            bar.set_message("still working");
-            bar.finish_and_clear();
-        }
+
+        let bar = p.spinner("working".into()).expect("live progress draws");
+
+        assert_eq!(bar.message(), "working");
+        assert!(!bar.is_finished());
+        bar.set_message("still working");
+        assert_eq!(bar.message(), "still working");
+        bar.finish_and_clear();
+        assert!(bar.is_finished());
+    }
+
+    #[test]
+    fn a_disabled_progress_never_draws_even_when_asked_twice() {
+        let p = Progress::disabled();
+
+        assert!(p.spinner("a".into()).is_none());
+        assert!(p.spinner("b".into()).is_none());
     }
 }
