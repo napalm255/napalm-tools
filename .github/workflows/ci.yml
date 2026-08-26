@@ -71,6 +71,9 @@ jobs:
       # The Bluefin image is large; free the runner's disk before pulling it.
       - if: matrix.target == 'bluefin'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      # Rootful podman: inside a rootless container on the runner, sudo's
+      # PAM account stage fails ("cannot retrieve authentication info").
       - run: ./tests/e2e/run.sh "$TARGET"
         env:
           TARGET: ${{ matrix.target }}
+          E2E_PODMAN: sudo podman

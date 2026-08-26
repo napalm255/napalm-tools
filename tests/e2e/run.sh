@@ -8,10 +8,14 @@
 #
 # E2E_BUNDLES limits what is applied (default: a fast, representative set).
 # E2E_FULL=1 applies everything, which downloads several gigabytes.
+# E2E_PODMAN names the podman command (default: podman). CI sets it to
+# "sudo podman": rootless podman on a GitHub runner cannot satisfy sudo's
+# PAM account check inside the container, and a root-run container can.
 set -euo pipefail
 
 main() {
-  local target="${1:?usage: run.sh fedora|bluefin}" here root bin image user extra_env
+  local target="${1:?usage: run.sh fedora|bluefin}" here root bin image user extra_env podman
+  read -r -a podman <<<"${E2E_PODMAN:-podman}"
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   root="$(cd "${here}/../.." && pwd)"
   bin="${root}/target/release/nt"
@@ -20,7 +24,7 @@ main() {
     echo "build first: cargo build --release" >&2
     exit 1
   }
-  command -v podman >/dev/null || {
+  command -v "${podman[-1]}" >/dev/null || {
     echo "podman is required" >&2
     exit 1
   }
@@ -49,14 +53,14 @@ main() {
   echo "== e2e: ${target} (${image})"
   if [[ ${target} == fedora ]]; then
     echo "== building ${image}"
-    podman build -q -t "${image}" -f "${root}/.devcontainer/Containerfile" "${root}" >/dev/null
+    "${podman[@]}" build -q -t "${image}" -f "${root}/.devcontainer/Containerfile" "${root}" >/dev/null
   fi
 
   # Under /var/tmp, not /usr/local: on an ostree image /usr/local is a symlink
   # into /var that does not exist inside a container. The mounts are `:z`
   # (shared label), not `:Z`: inside.sh is a tracked file and the binary is
   # build output, and neither should be relabelled as private to one container.
-  podman run --rm \
+  "${podman[@]}" run --rm \
     -v "${bin}:/var/tmp/nt-e2e/nt:ro,z" \
     -v "${here}/inside.sh:/var/tmp/nt-e2e/inside.sh:ro,z" \
     -e "E2E_USER=${user}" \
