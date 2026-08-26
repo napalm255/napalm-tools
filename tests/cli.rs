@@ -42,6 +42,13 @@ fn on_traditional(config: &Path) -> Command {
     cmd
 }
 
+/// A config naming a dnf-only extra package.
+///
+/// Every catalog package resolves through Homebrew, so `[extra]` is the only
+/// way a user actually reaches dnf - which is what "last resort" means in
+/// practice.
+const DNF_EXTRA: &str = "[extra]\ndnf = [\"some-kernel-tool\"]\n";
+
 /// Write a config file into a temporary directory.
 fn config_file(dir: &tempfile::TempDir, contents: &str) -> PathBuf {
     let p = dir.path().join("config.toml");
@@ -113,23 +120,23 @@ fn no_dnf_action_is_planned_on_an_atomic_host() {
 #[test]
 fn a_package_with_no_user_space_provider_is_reported_on_an_atomic_host() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, DNF_EXTRA);
 
     on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop"])
+        .args(["apply", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("xdotool"))
-        .stdout(predicates::str::contains("no user-space provider"));
+        .stdout(predicates::str::contains("some-kernel-tool"))
+        .stdout(predicates::str::contains("dnf is not available"));
 }
 
 #[test]
 fn strict_mode_exits_two_when_a_package_cannot_be_provisioned() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, DNF_EXTRA);
 
     on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop", "--strict"])
+        .args(["apply", "--dry-run", "--strict"])
         .assert()
         .code(2);
 }
@@ -369,10 +376,10 @@ fn bundles_emits_valid_json() {
 #[test]
 fn a_dry_run_emits_valid_json_with_the_commands_it_would_run() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, DNF_EXTRA);
 
     let out = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
+        .args(["apply", "--dry-run", "--output", "json"])
         .assert()
         .success()
         .get_output()
@@ -389,7 +396,10 @@ fn a_dry_run_emits_valid_json_with_the_commands_it_would_run() {
         .iter()
         .map(|u| u["package"].as_str().unwrap())
         .collect();
-    assert!(unavailable.contains(&"xdotool"), "got {unavailable:?}");
+    assert!(
+        unavailable.contains(&"some-kernel-tool"),
+        "got {unavailable:?}"
+    );
 }
 
 #[test]
@@ -571,22 +581,24 @@ fn dnf_actions_escalate_privileges() {
     // Without sudo the command cannot succeed: dnf refuses to run as a
     // normal user, so the old unprivileged form was dead on arrival.
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, DNF_EXTRA);
 
     on_traditional(&cfg)
-        .args(["apply", "--dry-run", "--desktop"])
+        .args(["apply", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("sudo dnf install -y xdotool"));
+        .stdout(predicates::str::contains(
+            "sudo dnf install -y some-kernel-tool",
+        ));
 }
 
 #[test]
 fn privileged_steps_are_visible_before_the_run_starts() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, DNF_EXTRA);
 
     let out = on_traditional(&cfg)
-        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
+        .args(["apply", "--dry-run", "--output", "json"])
         .assert()
         .success()
         .get_output()

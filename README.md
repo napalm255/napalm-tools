@@ -144,6 +144,10 @@ per package, rather than as a global rule.
 If no provider applies, the package is reported as unavailable and skipped.
 It is never installed by some other route.
 
+In practice every catalog package resolves through Homebrew, so `dnf` is
+genuinely a last resort: it is reached only through `[extra]`, or on a host
+where Homebrew is absent.
+
 ### Why `dnf` is gated on the platform, not on `PATH`
 
 On Bluefin, `dnf` is on `PATH` and appears to work. Anything it installs is
@@ -151,12 +155,17 @@ discarded at the next OS update. `nt` therefore refuses `dnf` on any
 ostree-booted host regardless of whether the binary exists:
 
 ```
-$ nt apply --dry-run --desktop        # on Bluefin
+$ cat ~/.config/napalm-tools/config.toml
+[extra]
+dnf = ["some-kernel-tool"]
+
+$ nt apply --dry-run          # on Bluefin
 Unavailable:
-  ! xdotool (desktop): no user-space provider on an atomic host
+  ! some-kernel-tool (extra): dnf is not available on this host
 ```
 
-The same catalog on a traditional Fedora host plans `dnf install -y xdotool`.
+On a traditional Fedora host the same configuration plans
+`sudo dnf install -y some-kernel-tool`.
 
 ### Flatpak scope
 

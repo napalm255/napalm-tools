@@ -406,18 +406,46 @@ mod tests {
 
     #[test]
     fn a_package_with_no_provider_here_is_reported_unavailable() {
-        // xdotool is dnf-only, and dnf is barred on an atomic host.
-        let plan = build(
-            &only(&["desktop"]),
-            &ATOMIC,
-            &snapshot(&[ManagerId::Brew, ManagerId::Flatpak]),
-        );
+        // Deliberately synthetic. Every package in the real catalog has a
+        // user-space provider, so a catalog entry cannot demonstrate this -
+        // the previous version of this test used xdotool, which turned out to
+        // be a Homebrew formula and so proved nothing.
+        static DNF_ONLY_PROVIDERS: &[crate::bundles::Provider] =
+            &[crate::bundles::Provider::gated(
+                ManagerId::Dnf,
+                "some-kernel-tool",
+                crate::platform::Platforms::NOT_ATOMIC,
+            )];
+        let pkg = crate::bundles::Pkg {
+            name: "some-kernel-tool",
+            binary: Some("some-kernel-tool"),
+            providers: DNF_ONLY_PROVIDERS,
+        };
+
+        let chosen = pkg.select(&ATOMIC, |m| m != ManagerId::Dnf || false);
 
         assert!(
-            plan.unavailable.iter().any(|u| u.package == "xdotool"),
-            "expected xdotool unavailable, got {:?}",
-            plan.unavailable
+            chosen.is_none(),
+            "a dnf-only package must be unavailable on an atomic host"
         );
+    }
+
+    #[test]
+    fn an_extra_naming_an_unusable_manager_is_the_real_unavailable_case() {
+        // Since every catalog package resolves, the escape hatch is where a
+        // user actually meets this: naming a manager that cannot run here.
+        let plan = build(
+            &cfg(&format!(
+                "{}\n[extra]\ndnf = [\"some-kernel-tool\"]\n",
+                none_toml()
+            )),
+            &ATOMIC,
+            &snapshot(&[ManagerId::Brew]),
+        );
+
+        assert_eq!(plan.unavailable.len(), 1);
+        assert_eq!(plan.unavailable[0].package, "some-kernel-tool");
+        assert!(plan.unavailable[0].reason.contains("dnf"));
     }
 
     #[test]

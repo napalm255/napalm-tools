@@ -498,3 +498,31 @@ line reads `antigravity -> agy` - the file `antigravity` is installed *as*
 
 The audit can only check what is currently installed, so it is a net rather
 than a proof.
+
+---
+
+# Correction: xdotool was never the example it was used as
+
+Throughout the original design and the seed catalog, `xdotool` served as the
+flagship case of "a package with no user-space provider on an atomic host". It
+is not one. `xdotool` is a Homebrew formula with an `x86_64_linux` bottle,
+BSD-3-Clause, and installs perfectly well in user space.
+
+The error was never checking. The package came from the dotfiles' xdotool
+scripts and was assumed to be dnf-only from the first draft, after which the
+seed catalog, several unit tests, the integration tests, the README and this
+document were all written around it.
+
+Two things follow, and the second matters more than the first.
+
+**The catalog entry is fixed.** `xdotool` now declares Homebrew first and dnf
+second, which is the ordinary shape of a provider list.
+
+**Nothing in the catalog is unavailable on an atomic host.** Every package
+resolves through Homebrew. The `Unavailable` path is real and still worth
+having, but no catalog entry demonstrates it, so the tests that claimed to were
+proving nothing. They now use `[extra]` naming a manager that cannot run on the
+host, which is the way a user actually meets this case.
+
+It also means `dnf` is reached only through `[extra]`, or where Homebrew is
+absent - which is what "last resort" was always supposed to mean.

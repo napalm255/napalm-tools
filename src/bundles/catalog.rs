@@ -537,16 +537,15 @@ static DESKTOP: &[Pkg] = &[
         binary: None,
         providers: &[Provider::new(ManagerId::Flatpak, "com.spotify.Client")],
     },
-    // No user-space provider exists on an atomic host: reported unavailable,
-    // never silently installed via dnf.
+    // Homebrew first, dnf only where Homebrew cannot serve. This is the
+    // ordinary shape of a provider list, and why the order is per-package.
     Pkg {
         name: "xdotool",
         binary: Some("xdotool"),
-        providers: &[Provider::gated(
-            ManagerId::Dnf,
-            "xdotool",
-            Platforms::NOT_ATOMIC,
-        )],
+        providers: &[
+            Provider::new(ManagerId::Brew, "xdotool"),
+            Provider::gated(ManagerId::Dnf, "xdotool", Platforms::NOT_ATOMIC),
+        ],
     },
 ];
 
