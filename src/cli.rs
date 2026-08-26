@@ -16,7 +16,8 @@ const NEGATIVE_PREFIX: &str = "no-";
 /// Build the full command tree.
 pub fn command() -> Command {
     let apply = with_bundle_flags(
-        Command::new("apply")
+        with_common_flags(Command::new("apply"))
+            .arg(quiet_flag())
             .about("Converge this machine on the resolved configuration")
             .arg(
                 Arg::new("dry-run")
@@ -44,62 +45,31 @@ pub fn command() -> Command {
             ),
     );
 
-    let status = with_bundle_flags(
+    let status = with_bundle_flags(with_common_flags(
         Command::new("status").about("Report desired versus installed state; changes nothing"),
-    );
+    ));
 
     Command::new("nt")
         .about("Fast, private, idempotent user-space system configuration")
         .version(clap::crate_version!())
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .action(ArgAction::Count)
-                .global(true)
-                .help("Show raw command output; repeat to add debug logging"),
-        )
-        .arg(
-            Arg::new("output")
-                .long("output")
-                .value_name("FORMAT")
-                .global(true)
-                .value_parser(clap::builder::PossibleValuesParser::new([
-                    "pretty", "plain", "json",
-                ]))
-                .help("Output format [default: pretty on a terminal, plain otherwise]"),
-        )
-        .arg(
-            Arg::new("quiet")
-                .short('q')
-                .long("quiet")
-                .action(ArgAction::SetTrue)
-                .global(true)
-                .help("Suppress progress output"),
-        )
-        .arg(
-            Arg::new("config")
-                .long("config")
-                .value_name("PATH")
-                .global(true)
-                .help("Use this configuration file instead of the default"),
-        )
         .subcommand(apply)
         .subcommand(status)
-        .subcommand(with_bundle_flags(
+        .subcommand(with_bundle_flags(with_common_flags(
             Command::new("bundles").about("List bundles and their effective state"),
-        ))
+        )))
         .subcommand(
             Command::new("config")
                 .about("Inspect configuration")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(with_bundle_flags(
+                .subcommand(with_bundle_flags(with_common_flags(
                     Command::new("show").about("Print the resolved configuration"),
-                ))
-                .subcommand(Command::new("path").about("Print the configuration file path")),
+                )))
+                .subcommand(with_common_flags(
+                    Command::new("path").about("Print the configuration file path"),
+                )),
         )
         .subcommand(Command::new("version").about("Print the version alone, for scripts"))
         .subcommand(
@@ -142,6 +112,54 @@ pub fn overrides_from(matches: &ArgMatches) -> CliOverrides {
         strict: flag("strict"),
         dotfiles_enabled: flag("no-dotfiles").map(|_| false),
     }
+}
+
+/// Read the configuration file. For every command that resolves settings.
+fn config_flag() -> Arg {
+    Arg::new("config")
+        .long("config")
+        .value_name("PATH")
+        .help("Use this configuration file instead of the default")
+}
+
+/// Choose how output is rendered.
+fn output_flag() -> Arg {
+    Arg::new("output")
+        .long("output")
+        .value_name("FORMAT")
+        .value_parser(clap::builder::PossibleValuesParser::new([
+            "pretty", "plain", "json",
+        ]))
+        .help("Output format [default: pretty on a terminal, plain otherwise]")
+}
+
+/// Show raw subprocess output and raise the logging level.
+fn verbose_flag() -> Arg {
+    Arg::new("verbose")
+        .short('v')
+        .long("verbose")
+        .action(ArgAction::Count)
+        .help("Show raw command output; repeat to add debug logging")
+}
+
+/// Silence on success. Only meaningful where a command reports on work done.
+fn quiet_flag() -> Arg {
+    Arg::new("quiet")
+        .short('q')
+        .long("quiet")
+        .action(ArgAction::SetTrue)
+        .help("Say nothing unless something fails")
+}
+
+/// Attach the flags shared by every command that resolves configuration.
+///
+/// Deliberately not global: `nt version --config` and `nt completions -q` are
+/// contradictions, and the CLI should refuse them rather than accept and
+/// ignore them.
+fn with_common_flags(cmd: Command) -> Command {
+    cmd.arg(config_flag())
+        .arg(output_flag())
+        .arg(verbose_flag())
 }
 
 /// Attach the generated `--<bundle>` / `--no-<bundle>` flags to a subcommand.
@@ -370,19 +388,108 @@ mod tests {
 
     #[test]
     fn verbosity_counts_up() {
+        // Not global, so it lands on the subcommand that declares it.
         let m = parse(&["nt", "apply", "-vv"]);
 
-        assert_eq!(m.get_count("verbose"), 2);
+        assert_eq!(
+            m.subcommand_matches("apply").unwrap().get_count("verbose"),
+            2
+        );
     }
 
     #[test]
     fn the_verbose_help_describes_raw_output_not_just_logging() {
         // The flag changed meaning; the help has to say so.
-        let help = command().render_long_help().to_string();
+        let mut cmd = command();
+        let apply = cmd
+            .get_subcommands_mut()
+            .find(|s| s.get_name() == "apply")
+            .expect("apply subcommand");
+        let help = apply.render_long_help().to_string();
 
         assert!(
             help.contains("raw command output"),
-            "help should explain -v shows raw output"
+            "help should explain -v shows raw output, got:\n{help}"
         );
+    }
+
+    // --- flags belong only where they mean something ------------------------
+
+    #[test]
+    fn version_takes_no_flags_at_all() {
+        // Its output is its entire purpose; every modifier is contradictory.
+        for flag in [
+            vec!["nt", "version", "-q"],
+            vec!["nt", "version", "-v"],
+            vec!["nt", "version", "--output", "json"],
+            vec!["nt", "version", "--config", "/tmp/x.toml"],
+        ] {
+            assert!(
+                command().try_get_matches_from(&flag).is_err(),
+                "{flag:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn completions_takes_no_flags_either() {
+        // `--quiet` here would emit an empty completion script, silently.
+        for flag in [
+            vec!["nt", "completions", "bash", "-q"],
+            vec!["nt", "completions", "bash", "--output", "json"],
+        ] {
+            assert!(
+                command().try_get_matches_from(&flag).is_err(),
+                "{flag:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn quiet_belongs_only_to_apply() {
+        // Only apply reports on work done, so only there does silence mean
+        // success. On a query command it just discards the answer.
+        assert!(
+            command()
+                .try_get_matches_from(["nt", "apply", "-q"])
+                .is_ok()
+        );
+
+        for argv in [
+            vec!["nt", "bundles", "-q"],
+            vec!["nt", "status", "-q"],
+            vec!["nt", "config", "show", "-q"],
+        ] {
+            assert!(
+                command().try_get_matches_from(&argv).is_err(),
+                "{argv:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn config_and_output_reach_every_command_that_reads_configuration() {
+        for argv in [
+            vec!["nt", "apply", "--config", "/tmp/x.toml"],
+            vec!["nt", "status", "--config", "/tmp/x.toml"],
+            vec!["nt", "bundles", "--config", "/tmp/x.toml"],
+            vec!["nt", "config", "path", "--config", "/tmp/x.toml"],
+            vec!["nt", "config", "show", "--config", "/tmp/x.toml"],
+        ] {
+            assert!(
+                command().try_get_matches_from(&argv).is_ok(),
+                "{argv:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn verbosity_reaches_the_commands_that_run_subprocesses() {
+        for argv in [vec!["nt", "apply", "-v"], vec!["nt", "status", "-vv"]] {
+            assert!(
+                command().try_get_matches_from(&argv).is_ok(),
+                "{argv:?} should be accepted"
+            );
+        }
     }
 }

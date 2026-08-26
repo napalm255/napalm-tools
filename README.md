@@ -64,10 +64,15 @@ stderr is a terminal and `plain` otherwise, so pipes and CI logs stay readable.
 | *(none)* | captured, hidden behind a spinner | warnings |
 | `-q` | captured, hidden, no progress | errors only |
 
-`-q` is silent on success - no progress, no summary, and no answer either,
-including from query commands like `nt version`. Silence means it worked;
-a failure still reports. Asking for quiet and for output at once is
-contradictory, and quiet is the more specific request.
+`-q` belongs to `nt apply` alone, the only command that reports on work
+done and so the only one where silence can mean success. A failure still
+reports.
+
+Flags are declared per command rather than globally, so a combination that
+could only contradict itself is refused rather than accepted and ignored:
+`nt version` takes no flags at all, and neither does `nt completions`.
+`--config`, `--output` and `-v` reach every command that resolves
+configuration.
 | `-v` | raw passthrough, spinner off | info |
 | `-vv` | raw passthrough | debug |
 

@@ -527,19 +527,39 @@ fn quiet_still_reports_a_failure() {
     let cfg = config_file(&dir, "[bundles]\ndevv = true\n");
 
     on_atomic(&cfg)
-        .args(["bundles", "-q"])
+        .args(["apply", "--dry-run", "-q"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("devv"));
 }
 
 #[test]
-fn quiet_silences_query_commands_too() {
-    // Consistency: -q means quiet everywhere, with no exceptions to remember.
-    Command::cargo_bin("nt")
-        .unwrap()
-        .args(["version", "-q"])
-        .assert()
-        .success()
-        .stdout(predicates::str::is_empty());
+fn quiet_is_refused_where_it_would_only_discard_the_answer() {
+    // Better to reject the flag than accept it and print nothing.
+    for argv in [
+        vec!["version", "-q"],
+        vec!["bundles", "-q"],
+        vec!["completions", "bash", "-q"],
+    ] {
+        Command::cargo_bin("nt")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("unexpected argument"));
+    }
+}
+
+#[test]
+fn version_refuses_flags_that_could_only_contradict_it() {
+    for argv in [
+        vec!["version", "--output", "json"],
+        vec!["version", "--config", "/tmp/x.toml"],
+    ] {
+        Command::cargo_bin("nt")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure();
+    }
 }

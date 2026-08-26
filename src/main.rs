@@ -13,13 +13,13 @@ const EXIT_UNMET: u8 = 2;
 
 fn main() -> ExitCode {
     let matches = cli::command().get_matches();
-    init_logging(&matches);
+    // Flags are declared per subcommand rather than globally, so that
+    // `nt version --config` is refused instead of accepted and ignored. That
+    // means they arrive on the innermost matches.
+    let flags = leaf(&matches);
+    init_logging(flags);
 
-    let ui = Ui::new(
-        format_from(&matches),
-        matches.get_count("verbose"),
-        matches.get_flag("quiet"),
-    );
+    let ui = Ui::new(format_from(flags), verbosity(flags), quiet(flags));
 
     match dispatch(&matches, &ui) {
         Ok(code) => code,
@@ -30,10 +30,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// How many times `-v` was given. Zero where the flag is not defined at all,
+/// as on `version` and `completions`.
+fn verbosity(matches: &ArgMatches) -> u8 {
+    matches
+        .try_get_one::<u8>("verbose")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Whether `--quiet` was given. False where the flag is not defined.
+fn quiet(matches: &ArgMatches) -> bool {
+    matches.try_get_one::<bool>("quiet").ok().flatten() == Some(&true)
+}
+
+/// The innermost subcommand's matches, where the shared flags land.
+fn leaf(matches: &ArgMatches) -> &ArgMatches {
+    let mut current = matches;
+    while let Some((_, sub)) = current.subcommand() {
+        current = sub;
+    }
+    current
+}
+
 /// The output format: what was asked for, or what suits the terminal.
 fn format_from(matches: &ArgMatches) -> Format {
     matches
-        .get_one::<String>("output")
+        .try_get_one::<String>("output")
+        .ok()
+        .flatten()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(Format::detect)
 }
@@ -43,10 +70,10 @@ fn format_from(matches: &ArgMatches) -> Format {
 /// `-v` primarily switches subprocess output to raw passthrough; raising the
 /// tracing level alongside it is the secondary effect.
 fn init_logging(matches: &ArgMatches) {
-    let default = if matches.get_flag("quiet") {
+    let default = if quiet(matches) {
         "error"
     } else {
-        match matches.get_count("verbose") {
+        match verbosity(matches) {
             0 => "warn",
             1 => "info",
             2 => "debug",
@@ -65,8 +92,10 @@ fn init_logging(matches: &ArgMatches) {
 
 /// The configuration path in effect, honouring `--config`.
 fn config_path(matches: &ArgMatches) -> PathBuf {
-    matches
-        .get_one::<String>("config")
+    leaf(matches)
+        .try_get_one::<String>("config")
+        .ok()
+        .flatten()
         .map(PathBuf::from)
         .unwrap_or_else(config::default_path)
 }
