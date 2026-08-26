@@ -3,25 +3,20 @@
 
 A wrong binary name is silent: the package installs, but the presence check
 never matches it, so `nt` reinstalls it whenever the owning manager happens not
-to report it. This compares declarations against the machine's real state and
-reports any package a manager calls installed whose declared binary is absent.
+to report it. This asks the built `nt` for its catalog, compares each
+declaration against the machine's real state, and reports any package a
+manager calls installed whose declared binary is absent.
 
 Only packages currently installed can be checked; the rest are skipped.
 """
 
-import re
+import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-CATALOG = Path(__file__).resolve().parent.parent / "src/bundles/catalog.rs"
-
-PKG = re.compile(
-    r'Pkg \{\s*name:\s*"([^"]+)",\s*binary:\s*(?:None|Some\("([^"]+)"\)),\s*'
-    r"providers:\s*&\[Provider::\w+\(([^)]*)\)\]",
-    re.S,
-)
+NT = Path(__file__).resolve().parent.parent / "target/release/nt"
 
 
 def brew_list(*args: str) -> set[str]:
@@ -32,40 +27,46 @@ def brew_list(*args: str) -> set[str]:
 
 
 def main() -> int:
+    if not NT.exists():
+        print("build first: cargo build --release", file=sys.stderr)
+        return 1
     if not shutil.which("brew"):
         print("brew not available; nothing to check", file=sys.stderr)
         return 0
 
+    catalog = json.loads(
+        subprocess.run(
+            [str(NT), "bundles", "--output", "json"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
     formulae = brew_list("--formula", "-1")
     casks = brew_list("--cask")
-    src = CATALOG.read_text()
 
     checked = 0
     suspects = []
-    for name, binary, args in PKG.findall(src):
-        if not binary:
-            continue
-        checked += 1
-        ids = re.findall(r'"([^"]+)"', args)
-        pkg_id = ids[0] if ids else name
-        if "BrewCask" in args:
-            installed = pkg_id in casks
-        elif "ManagerId::Brew," in args:
-            installed = pkg_id in formulae
-        else:
-            continue
-        if installed and shutil.which(binary) is None:
-            suspects.append((name, binary, pkg_id))
+    for bundle in catalog["bundles"]:
+        for pkg in bundle["packages"]:
+            binary = pkg["binary"]
+            if not binary:
+                continue
+            provider = pkg["providers"][0]
+            if provider["manager"] == "brew":
+                installed = provider["id"] in formulae
+            elif provider["manager"] == "brew-cask":
+                installed = provider["id"] in casks
+            else:
+                continue
+            checked += 1
+            if installed and shutil.which(binary) is None:
+                suspects.append((bundle["name"], pkg["name"], binary, provider["id"]))
 
-    print(f"checked {checked} packages with a declared binary")
-    if not suspects:
-        print("all declared binaries resolve")
-        return 0
-
-    print("\nmanager reports installed, but the declared binary is absent:")
-    for name, binary, pkg_id in suspects:
-        print(f"  {name:<20} declares {binary!r} (installed as {pkg_id})")
-    return 1
+    print(f"checked {checked} Homebrew packages with a declared binary")
+    for bundle, name, binary, pkg_id in suspects:
+        print(f"  {bundle}/{name}: {pkg_id} is installed but `{binary}` is not on PATH")
+    return 1 if suspects else 0
 
 
 if __name__ == "__main__":

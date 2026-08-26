@@ -46,15 +46,11 @@ impl Manager for Bun {
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["add".to_string(), "-g".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("bun", args)
+        Cmd::with_packages("bun", &["add", "-g"], packages)
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["update".to_string(), "-g".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("bun", args)
+        Cmd::with_packages("bun", &["update", "-g"], packages)
     }
 }
 

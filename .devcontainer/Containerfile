@@ -1,0 +1,32 @@
+# Development and end-to-end image: the official Fedora image, an ordinary
+# user with passwordless sudo, and mise. This is what `nt` targets on a plain
+# Fedora host, so the same image serves both the devcontainer and the Fedora
+# end-to-end run.
+#
+# Pinned by digest (fedora:44 as of 2026-08-25). Bump deliberately.
+FROM registry.fedoraproject.org/fedora:44@sha256:c095fee5833adde3e7fb9bdfc30023d34b884a327e8019d597c708cbe8d8dd13
+
+# What Homebrew's installer, mise, cargo and the tests need. `util-linux`
+# supplies `setsid`, which `nt` uses to detach subprocesses from the terminal.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        sudo git gcc make curl file procps-ng which tar gzip xz bzip2 unzip \
+        util-linux ca-certificates openssl-devel pkgconf-pkg-config \
+        python3 jq \
+    && dnf clean all
+
+ARG USERNAME=dev
+ARG UID=1000
+RUN useradd --uid "${UID}" --create-home --shell /bin/bash "${USERNAME}" \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}" \
+    && chmod 0440 "/etc/sudoers.d/${USERNAME}"
+
+USER ${USERNAME}
+WORKDIR /home/${USERNAME}
+ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/mise/shims:${PATH}"
+
+# mise, pinned. The installer verifies the download against its own checksums.
+ARG MISE_VERSION=v2026.8.13
+RUN curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION}" sh \
+    && mise --version
+
+WORKDIR /workspaces/napalm-tools

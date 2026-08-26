@@ -1,10 +1,10 @@
 //! Running a plan, and taking the snapshot a plan is built from.
 
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use crate::managers::{self, Cmd, ManagerId};
-use crate::plan::{ActionPlan, Snapshot};
+use crate::plan::{ActionPlan, Probe, Snapshot};
 use crate::platform::Platform;
 use crate::ui::Ui;
 use crate::ui::scan::{Findings, Scanner};
@@ -31,26 +31,42 @@ pub struct RunReport {
     pub total: std::time::Duration,
 }
 
+/// What is on the host before anything is bootstrapped.
+pub fn probe() -> Probe {
+    Probe {
+        brew: managers::on_path("brew"),
+        mise: managers::on_path("mise"),
+        sudo: managers::on_path("sudo"),
+    }
+}
+
 /// Query every manager for what it has installed.
 ///
 /// A manager that is unavailable here is skipped entirely, so no subprocess is
 /// spawned for it. One that is available but fails to answer is a hard error:
 /// planning against a half-known world would install things twice.
-pub fn snapshot(platform: &Platform, ui: &Ui) -> Result<Snapshot> {
+///
+/// `assume` names managers to treat as available with nothing installed - the
+/// ones a dry run's bootstrap phase would have made available.
+pub fn snapshot(platform: &Platform, assume: &[ManagerId], ui: &Ui) -> Result<Snapshot> {
     let mut snap = Snapshot::default();
-    let usable: Vec<_> = managers::all()
-        .into_iter()
-        .filter(|m| m.available(platform))
-        .collect();
     let probe = ui.probe("Checking installed packages");
+    let mut checked = 0usize;
 
     for manager in managers::all() {
         let id = manager.id();
+        if assume.contains(&id) {
+            tracing::debug!(manager = %id, "assumed available after bootstrap");
+            snap.available.insert(id);
+            snap.installed.insert(id, HashSet::new());
+            continue;
+        }
         if !manager.available(platform) {
             tracing::debug!(manager = %id, "not available on this host");
             continue;
         }
-        probe.detail(&format!("{id}"));
+        probe.detail(id.as_str());
+        checked += 1;
         snap.available.insert(id);
 
         let installed = manager
@@ -59,29 +75,33 @@ pub fn snapshot(platform: &Platform, ui: &Ui) -> Result<Snapshot> {
         tracing::debug!(manager = %id, count = installed.len(), "listed installed packages");
         snap.installed.insert(id, installed);
 
-        if id == ManagerId::Brew {
-            snap.taps = manager
-                .installed_taps()
-                .with_context(|| format!("failed to list {id} taps"))?;
-            snap.trusted_taps = manager
-                .trusted_taps()
-                .with_context(|| format!("failed to list trusted {id} taps"))?;
+        match id {
+            ManagerId::Brew => {
+                snap.taps = manager
+                    .installed_taps()
+                    .with_context(|| format!("failed to list {id} taps"))?;
+                snap.trusted_taps = manager
+                    .trusted_taps()
+                    .with_context(|| format!("failed to list trusted {id} taps"))?;
+            }
+            ManagerId::Flatpak => {
+                snap.remotes = manager
+                    .remotes()
+                    .with_context(|| format!("failed to list {id} remotes"))?;
+            }
+            _ => {}
         }
     }
 
     snap.binaries = binaries_on_path();
     probe.finish(&format!(
-        "checked {} package manager{}",
-        usable.len(),
-        if usable.len() == 1 { "" } else { "s" }
+        "checked {checked} package manager{}",
+        if checked == 1 { "" } else { "s" }
     ));
     Ok(snap)
 }
 
 /// Which of the catalog's declared executables resolve on `PATH`.
-///
-/// This is what lets a tool provided by the OS image, or installed by a
-/// vendor script, count as satisfied instead of being installed a second time.
 fn binaries_on_path() -> HashSet<String> {
     crate::bundles::BUNDLES
         .iter()
@@ -92,20 +112,9 @@ fn binaries_on_path() -> HashSet<String> {
         .collect()
 }
 
-/// Run every action in a plan, in order.
+/// Run every command in a plan, in order: bootstrap, actions, dotfiles.
 pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
-    // Ask for the password before anything runs and before the spinner starts,
-    // so a refusal costs nothing and the prompt is the only thing on screen.
-    if crate::privilege::plan_needs_privileges(plan) && !crate::privilege::already_authorised() {
-        ui.line("Some steps need elevated privileges.");
-        crate::privilege::prime()?;
-    }
-
-    let mut commands: Vec<Cmd> = plan.actions.iter().map(|a| a.to_cmd()).collect();
-    // Dotfiles come last, so chezmoi itself can have been installed by the
-    // package actions above on a fresh machine.
-    commands.extend(plan.dotfiles.iter().cloned());
-    run_commands(&commands, ui)
+    run_commands(&plan.commands(), ui)
 }
 
 /// Whether a failure looks like a command that wanted to ask a question.
@@ -132,17 +141,23 @@ pub fn looks_like_a_prompt_failure(tail: &str) -> bool {
 
 /// Run a sequence of commands, stopping at the first failure.
 ///
-/// Output is captured by default and scanned for the few lines worth showing;
-/// under `-v` it streams through untouched instead. A failure carries the
-/// command and the tail of its output, so capturing leaves a failure easier to
-/// diagnose than inheriting stdio did, not harder.
+/// Asks for the sudo password first if any command is privileged and no
+/// credential is cached, so a refusal costs nothing and the prompt is the
+/// only thing on screen. Output is captured by default and scanned for the
+/// few lines worth showing; under `-v` it streams through untouched.
 pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
+    if commands.iter().any(|c| c.privileged) && !crate::privilege::already_authorised() {
+        ui.line("Some steps need elevated privileges.");
+        crate::privilege::prime()?;
+    }
+
     let started = std::time::Instant::now();
     let mut report = RunReport::default();
     let total = commands.len();
 
     for (i, cmd) in commands.iter().enumerate() {
         let label = cmd.to_shell();
+        tracing::info!(step = i + 1, total, command = %label, "running");
         let step = ui.step(i + 1, total, &label);
 
         let outcome = if ui.raw_subprocess_output() {
@@ -187,26 +202,6 @@ pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
     Ok(report)
 }
 
-/// Packages each manager reports as explicitly requested, for `nt status`.
-///
-/// Homebrew is the only manager that distinguishes explicit installs from
-/// dependencies, so it is the only one where this differs from [`snapshot`].
-pub fn explicit_packages(platform: &Platform) -> Result<BTreeMap<ManagerId, usize>> {
-    let mut counts = BTreeMap::new();
-    for manager in managers::all() {
-        if !manager.available(platform) {
-            continue;
-        }
-        let count = if manager.id() == ManagerId::Brew {
-            managers::brew::Brew.leaves()?.len()
-        } else {
-            manager.installed()?.len()
-        };
-        counts.insert(manager.id(), count);
-    }
-    Ok(counts)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +239,6 @@ mod tests {
 
     #[test]
     fn a_failure_carries_the_output_tail() {
-        // Capturing output must not make a failure harder to diagnose.
         let cmds = vec![Cmd::new(
             "sh",
             ["-c", "echo 'something went wrong' 1>&2; exit 2"],
@@ -259,32 +253,22 @@ mod tests {
     }
 
     #[test]
-    fn caveats_in_output_are_collected() {
+    fn caveats_and_warnings_in_output_are_collected() {
         let cmds = vec![Cmd::new(
             "sh",
-            ["-c", "echo '==> Caveats'; echo 'run this in your shell'"],
+            [
+                "-c",
+                "echo 'Warning: already installed'; echo '==> Caveats'; echo 'run this in your shell'",
+            ],
         )];
 
         let report = run_commands(&cmds, &ui()).unwrap();
 
-        assert_eq!(
-            report.findings.caveats.len(),
-            1,
-            "got {:?}",
-            report.findings
-        );
+        assert_eq!(report.findings.caveats.len(), 1, "{:?}", report.findings);
         assert_eq!(
             report.findings.caveats[0].lines,
             vec!["run this in your shell"]
         );
-    }
-
-    #[test]
-    fn warnings_in_output_are_collected() {
-        let cmds = vec![Cmd::new("sh", ["-c", "echo 'Warning: already installed'"])];
-
-        let report = run_commands(&cmds, &ui()).unwrap();
-
         assert_eq!(report.findings.warnings.len(), 1);
     }
 
@@ -305,7 +289,6 @@ mod tests {
 
     #[test]
     fn a_prompt_related_failure_is_recognised() {
-        // The exact strings these tools emit, as measured.
         for tail in [
             "sudo: a terminal is required to read the password",
             "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
@@ -328,32 +311,42 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_failure_carries_the_hint() {
-        let cmds = vec![Cmd::new(
-            "sh",
-            [
-                "-c",
-                "echo 'sudo: a terminal is required to read the password' 1>&2; exit 1",
-            ],
-        )];
-
-        let err = run_commands(&cmds, &ui()).unwrap_err();
-
+    fn a_prompt_failure_carries_the_hint_and_an_ordinary_one_does_not() {
+        let err = run_commands(
+            &[Cmd::new(
+                "sh",
+                [
+                    "-c",
+                    "echo 'sudo: a terminal is required to read the password' 1>&2; exit 1",
+                ],
+            )],
+            &ui(),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("re-run with -v"), "got {err:#}");
-    }
 
-    #[test]
-    fn an_ordinary_failure_carries_no_hint() {
-        let cmds = vec![Cmd::new(
-            "sh",
-            ["-c", "echo 'no such formula' 1>&2; exit 1"],
-        )];
-
-        let err = run_commands(&cmds, &ui()).unwrap_err();
-
+        let err = run_commands(
+            &[Cmd::new(
+                "sh",
+                ["-c", "echo 'no such formula' 1>&2; exit 1"],
+            )],
+            &ui(),
+        )
+        .unwrap_err();
         assert!(
             !format!("{err:#}").contains("re-run with -v"),
             "got {err:#}"
         );
+    }
+
+    #[test]
+    fn the_probe_reports_what_is_on_path() {
+        // sudo and brew may or may not exist; the probe must simply agree
+        // with the resolver rather than have an opinion of its own.
+        let p = probe();
+
+        assert_eq!(p.brew, managers::on_path("brew"));
+        assert_eq!(p.mise, managers::on_path("mise"));
+        assert_eq!(p.sudo, managers::on_path("sudo"));
     }
 }

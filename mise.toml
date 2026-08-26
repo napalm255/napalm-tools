@@ -1,0 +1,10 @@
+# Toolchain for working on napalm-tools. `mise install` sets it up; the
+# devcontainer does that on create. `just` remains the task runner.
+[tools]
+rust = "1.97.1"
+just = "1.55.1"
+cargo-binstall = "1.22.0"
+
+[env]
+# Bottles, not builds, in the devcontainer and in end-to-end runs.
+HOMEBREW_NO_AUTO_UPDATE = "1"

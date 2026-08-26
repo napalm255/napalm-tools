@@ -17,6 +17,17 @@ pub struct Layer {
     pub options: OptionsLayer,
     /// Dotfiles bootstrap settings.
     pub dotfiles: DotfilesLayer,
+    /// Shell settings.
+    pub shell: ShellLayer,
+}
+
+/// Shell settings, all optional at the layer level.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ShellLayer {
+    /// Which prompt to install and activate: `starship`, `oh-my-posh` or
+    /// `powerbash`.
+    pub prompt: Option<String>,
 }
 
 /// Run-behaviour options, all optional at the layer level.
@@ -89,6 +100,9 @@ upgrade = true
 [dotfiles]
 enabled = true
 repo    = "https://github.com/napalm255/dotfiles"
+
+[shell]
+prompt = "oh-my-posh"
 "#,
         )
         .unwrap();
@@ -98,6 +112,13 @@ repo    = "https://github.com/napalm255/dotfiles"
         assert_eq!(c.base.extra.get("brew").unwrap(), &["jless", "dust"]);
         assert_eq!(c.base.options.upgrade, Some(true));
         assert_eq!(c.base.dotfiles.enabled, Some(true));
+        assert_eq!(c.base.shell.prompt.as_deref(), Some("oh-my-posh"));
+    }
+
+    #[test]
+    fn an_unknown_key_is_ignored_by_the_parser_not_the_resolver() {
+        // serde is lenient here; the resolver is where names are checked.
+        assert!(ConfigFile::parse("[bundles]\nwhatever = true\n").is_ok());
     }
 
     #[test]

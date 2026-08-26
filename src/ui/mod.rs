@@ -36,9 +36,11 @@ pub enum Format {
 
 impl Format {
     /// The format to use when none was requested: decoration only earns its
-    /// place when a human is watching.
+    /// place when a human is watching, and the answer goes to stdout, so
+    /// stdout is what decides. `nt bundles > file` must never put escape
+    /// sequences in the file, however lively the terminal on stderr.
     pub fn detect() -> Format {
-        if std::io::stderr().is_terminal() {
+        if std::io::stdout().is_terminal() {
             Format::Pretty
         } else {
             Format::Plain
@@ -89,14 +91,19 @@ pub struct Ui {
 
 impl Ui {
     /// A `Ui` writing to the real streams.
+    ///
+    /// Progress lives on stderr and is drawn only when stderr is a terminal,
+    /// independently of the format: a pretty answer piped to `less` still
+    /// gets a spinner, and a JSON answer never does.
     pub fn new(format: Format, verbosity: u8, quiet: bool) -> Ui {
+        let live = format != Format::Json && !quiet && std::io::stderr().is_terminal();
         Ui {
             format,
             theme: Theme::for_format(format),
             verbosity,
             quiet,
             sink: Sink::Std,
-            progress: progress::Progress::new(format, quiet),
+            progress: progress::Progress::new(live),
         }
     }
 
@@ -166,14 +173,14 @@ impl Ui {
         if self.quiet || self.format == Format::Json {
             return;
         }
-        self.write_err(&format!("warning: {msg}\n"));
+        self.write_err(&format!("{} {msg}\n", self.theme.warn.apply_to("warning:")));
     }
 
     /// Write an error to stderr.
     ///
     /// Never suppressed: a failure must not be silent in any mode.
     pub fn error(&self, msg: &str) {
-        self.write_err(&format!("error: {msg}\n"));
+        self.write_err(&format!("{} {msg}\n", self.theme.bad.apply_to("error:")));
     }
 
     /// Begin an open-ended activity with no step number - checking, probing,
@@ -232,31 +239,43 @@ impl Ui {
             }
             return;
         }
+        let t = &self.theme;
 
         if !report.steps.is_empty() {
             let mut line = format!(
-                "\n{} step{} in {}",
+                "{} step{} in {}",
                 report.steps.len(),
                 if report.steps.len() == 1 { "" } else { "s" },
                 human_duration(report.total)
             );
             if failed > 0 {
                 line.push_str(&format!(", {failed} failed"));
+                self.write_err(&format!("\n{} {}\n", t.cross(), t.bad.apply_to(line)));
+            } else {
+                self.write_err(&format!("\n{} {}\n", t.tick(), t.good.apply_to(line)));
             }
-            self.write_err(&format!("{line}\n"));
         }
 
         for caveat in &report.findings.caveats {
-            self.write_err(&format!("\nnote from `{}`:\n", caveat.source));
+            self.write_err(&format!(
+                "\n{} {}\n",
+                t.note_icon(),
+                t.heading
+                    .apply_to(format!("note from `{}`:", caveat.source))
+            ));
             for line in &caveat.lines {
                 self.write_err(&format!("  {line}\n"));
             }
         }
 
         if !report.findings.warnings.is_empty() {
-            self.write_err("\nwarnings:\n");
+            self.write_err(&format!(
+                "\n{} {}\n",
+                t.warn_icon(),
+                t.heading.apply_to("warnings:")
+            ));
             for w in &report.findings.warnings {
-                self.write_err(&format!("  {w}\n"));
+                self.write_err(&format!("  {}\n", t.warn.apply_to(w)));
             }
         }
     }
@@ -266,11 +285,14 @@ impl Ui {
         self.quiet || self.format == Format::Json
     }
 
-    /// Emit a line without disturbing a live spinner region.
+    /// Emit a completed step's line.
+    ///
+    /// Written straight to stderr rather than through the progress region:
+    /// the step's own spinner has already been cleared, and indicatif's
+    /// `println` ends its line with a carriage return once no bar is live,
+    /// which left the next stdout line glued to this one.
     fn step_line(&self, text: &str) {
-        if !self.progress.println(text.trim_end()) {
-            self.write_err(text);
-        }
+        self.write_err(text);
     }
 
     fn write_out(&self, text: &str) {

@@ -8,16 +8,20 @@
 use anyhow::Result;
 use std::collections::HashSet;
 
-use super::{Cmd, Manager, ManagerId};
+use super::{Cmd, Manager, ManagerId, parse_lines};
 use crate::platform::Platform;
 
 /// The dnf manager.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Dnf;
 
-/// Parse `rpm -qa --queryformat '%{NAME}\n'` output into package names.
-pub fn parse_installed(output: &str) -> HashSet<String> {
-    super::parse_lines(output)
+impl Dnf {
+    /// Whether dnf can supply Homebrew's prerequisites on this platform: a
+    /// mutable Fedora-family host. The same rule as [`Manager::platform_ok`],
+    /// reachable without a trait object.
+    pub fn usable_for_bootstrap(platform: &Platform) -> bool {
+        !platform.atomic && platform.fedora_family
+    }
 }
 
 impl Manager for Dnf {
@@ -30,7 +34,7 @@ impl Manager for Dnf {
     }
 
     fn platform_ok(&self, platform: &Platform) -> bool {
-        !platform.atomic && platform.fedora_family
+        Dnf::usable_for_bootstrap(platform)
     }
 
     fn available(&self, platform: &Platform) -> bool {
@@ -40,21 +44,17 @@ impl Manager for Dnf {
     }
 
     fn installed(&self) -> Result<HashSet<String>> {
-        Ok(parse_installed(
+        Ok(parse_lines(
             &Cmd::new("rpm", ["-qa", "--queryformat", "%{NAME}\n"]).output()?,
         ))
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["dnf".to_string(), "install".to_string(), "-y".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("sudo", args).privileged()
+        Cmd::with_packages("sudo", &["dnf", "install", "-y"], packages).privileged()
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["dnf".to_string(), "upgrade".to_string(), "-y".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("sudo", args).privileged()
+        Cmd::with_packages("sudo", &["dnf", "upgrade", "-y"], packages).privileged()
     }
 }
 
@@ -62,21 +62,7 @@ impl Manager for Dnf {
 mod tests {
     use super::*;
 
-    const ATOMIC: Platform = Platform {
-        fedora_family: true,
-        atomic: true,
-        wsl: false,
-    };
-    const PLAIN: Platform = Platform {
-        fedora_family: true,
-        atomic: false,
-        wsl: false,
-    };
-    const UBUNTU: Platform = Platform {
-        fedora_family: false,
-        atomic: false,
-        wsl: false,
-    };
+    use crate::platform::test_platforms::{ATOMIC, CONTAINER, PLAIN, UBUNTU, UNDER_WSL};
 
     #[test]
     fn dnf_is_never_usable_on_an_atomic_host() {
@@ -99,23 +85,18 @@ mod tests {
     }
 
     #[test]
+    fn dnf_is_usable_under_wsl_and_in_the_fedora_container() {
+        // Both are mutable Fedora; the container is where Homebrew's own
+        // prerequisites come from.
+        assert!(Dnf.platform_ok(&UNDER_WSL));
+        assert!(Dnf.platform_ok(&CONTAINER));
+    }
+
+    #[test]
     fn available_is_false_on_atomic_even_when_the_binary_exists() {
         // `available` combines the platform gate with a PATH lookup; on this
         // machine `dnf` really is on PATH, so this asserts the gate wins.
         assert!(!Dnf.available(&ATOMIC));
-    }
-
-    #[test]
-    fn parses_package_names_from_rpm_output() {
-        let set = parse_installed("bash\ncoreutils\nxdotool\n");
-
-        assert!(set.contains("xdotool"));
-        assert_eq!(set.len(), 3);
-    }
-
-    #[test]
-    fn empty_output_is_an_empty_set() {
-        assert!(parse_installed("").is_empty());
     }
 
     #[test]

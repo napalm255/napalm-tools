@@ -1,23 +1,20 @@
 //! Command-line surface.
 //!
-//! Bundle flags are emitted by iterating the catalog rather than being written
-//! out by hand, so a new bundle cannot ship without its flags. That is the
-//! whole parity guarantee: there is only one list.
+//! Every flag is declared on exactly the commands where it does something,
+//! so `--help` for a command shows only what applies to it and a
+//! contradiction such as `nt version --quiet` is refused rather than accepted
+//! and ignored. Bundle and prompt names are validated by clap against the
+//! catalog, which also gives completions the values.
 
-use clap::{Arg, ArgAction, ArgMatches, Command};
-use std::collections::BTreeMap;
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValuesParser};
 
 use crate::bundles::BUNDLES;
-use crate::config::CliOverrides;
-
-/// The `--no-` prefix used for the negative form of a bundle flag.
-const NEGATIVE_PREFIX: &str = "no-";
+use crate::config::{CliOverrides, PROMPTS};
 
 /// Build the full command tree.
 pub fn command() -> Command {
-    let apply = with_bundle_flags(
-        with_common_flags(Command::new("apply"))
-            .arg(quiet_flag())
+    let apply = with_selection_flags(with_common_flags(
+        Command::new("apply")
             .about("Converge this machine on the resolved configuration")
             .arg(
                 Arg::new("dry-run")
@@ -35,19 +32,31 @@ pub fn command() -> Command {
                 Arg::new("strict")
                     .long("strict")
                     .action(ArgAction::SetTrue)
-                    .help("Exit non-zero if any package has no provider here"),
+                    .help("Exit 2 if any package has no provider here"),
             )
             .arg(
                 Arg::new("no-dotfiles")
                     .long("no-dotfiles")
                     .action(ArgAction::SetTrue)
                     .help("Skip the dotfiles step"),
-            ),
-    );
-
-    let status = with_bundle_flags(with_common_flags(
-        Command::new("status").about("Report desired versus installed state; changes nothing"),
+            )
+            .arg(
+                Arg::new("prompt")
+                    .long("prompt")
+                    .value_name("NAME")
+                    .value_parser(PossibleValuesParser::new(PROMPTS))
+                    .help("Shell prompt to install and activate [default: from config, else starship]"),
+            )
+            .arg(quiet_flag()),
     ));
+
+    let status = with_detail_flag(with_selection_flags(with_common_flags(
+        Command::new("status").about("Report desired versus installed state; changes nothing"),
+    )));
+
+    let bundles = with_detail_flag(with_selection_flags(with_common_flags(
+        Command::new("bundles").about("List the catalog and each bundle's state here"),
+    )));
 
     Command::new("nt")
         .about("Fast, private, idempotent user-space system configuration")
@@ -56,20 +65,35 @@ pub fn command() -> Command {
         .arg_required_else_help(true)
         .subcommand(apply)
         .subcommand(status)
-        .subcommand(with_bundle_flags(with_common_flags(
-            Command::new("bundles").about("List bundles and their effective state"),
-        )))
+        .subcommand(bundles)
         .subcommand(
             Command::new("config")
                 .about("Inspect configuration")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(with_bundle_flags(with_common_flags(
+                .subcommand(with_selection_flags(with_common_flags(
                     Command::new("show").about("Print the resolved configuration"),
                 )))
-                .subcommand(with_common_flags(
-                    Command::new("path").about("Print the configuration file path"),
-                )),
+                .subcommand(
+                    Command::new("path")
+                        .about("Print the configuration file path")
+                        .arg(config_flag()),
+                ),
+        )
+        .subcommand(
+            Command::new("shell-init")
+                .about("Print the shell code that activates the configured prompt")
+                .long_about(
+                    "Print the shell code that activates the configured prompt.\n\n\
+                     Add to your shell's start-up file:\n  eval \"$(nt shell-init bash)\"",
+                )
+                .arg(
+                    Arg::new("shell")
+                        .required(true)
+                        .value_parser(PossibleValuesParser::new(SHELLS))
+                        .help("Shell to generate for"),
+                )
+                .arg(config_flag()),
         )
         .subcommand(Command::new("version").about("Print the version alone, for scripts"))
         .subcommand(
@@ -84,19 +108,19 @@ pub fn command() -> Command {
         )
 }
 
-/// Extract bundle toggles and run options from parsed arguments.
-pub fn overrides_from(matches: &ArgMatches) -> CliOverrides {
-    let mut bundles = BTreeMap::new();
-    for b in BUNDLES {
-        let negative = format!("{NEGATIVE_PREFIX}{}", b.name);
-        // The negative form is checked first so `--x --no-x` resolves to off.
-        if matches.try_get_one::<bool>(&negative).ok().flatten() == Some(&true) {
-            bundles.insert(b.name.to_string(), false);
-        } else if matches.try_get_one::<bool>(b.name).ok().flatten() == Some(&true) {
-            bundles.insert(b.name.to_string(), true);
-        }
-    }
+/// Shells `shell-init` can target.
+pub const SHELLS: &[&str] = &["bash", "zsh", "fish"];
 
+/// Extract bundle selection and run options from parsed arguments.
+pub fn overrides_from(matches: &ArgMatches) -> CliOverrides {
+    let many = |name: &str| -> Vec<String> {
+        matches
+            .try_get_many::<String>(name)
+            .ok()
+            .flatten()
+            .map(|v| v.cloned().collect())
+            .unwrap_or_default()
+    };
     let flag = |name: &str| -> Option<bool> {
         matches
             .try_get_one::<bool>(name)
@@ -107,10 +131,16 @@ pub fn overrides_from(matches: &ArgMatches) -> CliOverrides {
     };
 
     CliOverrides {
-        bundles,
+        skip: many("skip"),
+        only: many("only"),
         upgrade: flag("upgrade"),
         strict: flag("strict"),
         dotfiles_enabled: flag("no-dotfiles").map(|_| false),
+        prompt: matches
+            .try_get_one::<String>("prompt")
+            .ok()
+            .flatten()
+            .cloned(),
     }
 }
 
@@ -127,9 +157,7 @@ fn output_flag() -> Arg {
     Arg::new("output")
         .long("output")
         .value_name("FORMAT")
-        .value_parser(clap::builder::PossibleValuesParser::new([
-            "pretty", "plain", "json",
-        ]))
+        .value_parser(PossibleValuesParser::new(["pretty", "plain", "json"]))
         .help("Output format [default: pretty on a terminal, plain otherwise]")
 }
 
@@ -152,37 +180,41 @@ fn quiet_flag() -> Arg {
 }
 
 /// Attach the flags shared by every command that resolves configuration.
-///
-/// Deliberately not global: `nt version --config` and `nt completions -q` are
-/// contradictions, and the CLI should refuse them rather than accept and
-/// ignore them.
 fn with_common_flags(cmd: Command) -> Command {
     cmd.arg(config_flag())
         .arg(output_flag())
         .arg(verbose_flag())
 }
 
-/// Attach the generated `--<bundle>` / `--no-<bundle>` flags to a subcommand.
-fn with_bundle_flags(mut cmd: Command) -> Command {
-    for b in BUNDLES {
-        let negative = format!("{NEGATIVE_PREFIX}{}", b.name);
-        cmd = cmd
-            .arg(
-                Arg::new(b.name)
-                    .long(b.name)
-                    .action(ArgAction::SetTrue)
-                    .overrides_with(negative.clone())
-                    .help(format!("Enable: {}", b.description)),
-            )
-            .arg(
-                Arg::new(negative.clone())
-                    .long(negative)
-                    .action(ArgAction::SetTrue)
-                    .overrides_with(b.name)
-                    .help(format!("Disable: {}", b.description)),
-            );
-    }
-    cmd
+/// Attach `--skip` and `--only`, validated against the catalog.
+fn with_selection_flags(cmd: Command) -> Command {
+    let names: Vec<&'static str> = BUNDLES.iter().map(|b| b.name).collect();
+    cmd.arg(
+        Arg::new("skip")
+            .long("skip")
+            .value_name("BUNDLE")
+            .action(ArgAction::Append)
+            .value_parser(PossibleValuesParser::new(names.clone()))
+            .help("Leave this bundle out for this run (repeatable)"),
+    )
+    .arg(
+        Arg::new("only")
+            .long("only")
+            .value_name("BUNDLE")
+            .action(ArgAction::Append)
+            .value_parser(PossibleValuesParser::new(names))
+            .help("Consider only this bundle for this run (repeatable)"),
+    )
+}
+
+/// Attach `--detail`.
+fn with_detail_flag(cmd: Command) -> Command {
+    cmd.arg(
+        Arg::new("detail")
+            .long("detail")
+            .action(ArgAction::SetTrue)
+            .help("Show every package, not just each bundle's summary"),
+    )
 }
 
 #[cfg(test)]
@@ -194,90 +226,68 @@ mod tests {
         command().try_get_matches_from(args).unwrap()
     }
 
-    #[test]
-    fn every_bundle_gets_both_flags() {
-        // The parity guarantee: adding a bundle adds its flags automatically.
-        let cmd = command();
-        let apply = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "apply")
-            .expect("apply subcommand");
-        let longs: Vec<String> = apply
-            .get_arguments()
-            .filter_map(|a| a.get_long().map(str::to_string))
-            .collect();
+    fn accepted(argv: &[&str]) -> bool {
+        command().try_get_matches_from(argv).is_ok()
+    }
 
+    #[test]
+    fn skip_and_only_collect_bundle_names() {
+        let m = parse(&[
+            "nt", "apply", "--skip", "android", "--skip", "fonts", "--only", "core",
+        ]);
+        let o = overrides_from(m.subcommand_matches("apply").unwrap());
+
+        assert_eq!(o.skip, vec!["android", "fonts"]);
+        assert_eq!(o.only, vec!["core"]);
+    }
+
+    #[test]
+    fn an_unknown_bundle_is_rejected_by_the_parser() {
+        assert!(!accepted(&["nt", "apply", "--skip", "nope"]));
+        assert!(!accepted(&["nt", "status", "--only", "nope"]));
+    }
+
+    #[test]
+    fn every_catalog_bundle_is_a_valid_value() {
         for b in BUNDLES {
-            assert!(longs.contains(&b.name.to_string()), "missing --{}", b.name);
-            assert!(
-                longs.contains(&format!("no-{}", b.name)),
-                "missing --no-{}",
-                b.name
-            );
+            assert!(accepted(&["nt", "bundles", "--skip", b.name]), "{}", b.name);
         }
     }
 
     #[test]
-    fn the_negative_flag_disables_a_bundle() {
-        let m = parse(&["nt", "apply", "--no-go-runtime"]);
-        let sub = m.subcommand_matches("apply").unwrap();
-
-        let o = overrides_from(sub);
-
-        assert_eq!(o.bundles.get("go-runtime"), Some(&false));
-    }
-
-    #[test]
-    fn the_positive_flag_enables_a_bundle() {
-        let m = parse(&["nt", "apply", "--aws"]);
-        let sub = m.subcommand_matches("apply").unwrap();
-
-        let o = overrides_from(sub);
-
-        assert_eq!(o.bundles.get("aws"), Some(&true));
-    }
-
-    #[test]
-    fn an_unmentioned_bundle_is_left_to_the_configuration() {
+    fn nothing_given_means_nothing_overridden() {
         let m = parse(&["nt", "apply"]);
-        let sub = m.subcommand_matches("apply").unwrap();
+        let o = overrides_from(m.subcommand_matches("apply").unwrap());
 
-        let o = overrides_from(sub);
-
-        assert!(o.bundles.is_empty(), "got {:?}", o.bundles);
-    }
-
-    #[test]
-    fn the_last_of_a_conflicting_pair_wins() {
-        let m = parse(&["nt", "apply", "--no-aws", "--aws"]);
-        let sub = m.subcommand_matches("apply").unwrap();
-
-        let o = overrides_from(sub);
-
-        assert_eq!(o.bundles.get("aws"), Some(&true), "later flag should win");
-    }
-
-    #[test]
-    fn run_options_are_only_set_when_given() {
-        let bare = parse(&["nt", "apply"]);
-        let o = overrides_from(bare.subcommand_matches("apply").unwrap());
+        assert!(o.skip.is_empty() && o.only.is_empty());
         assert_eq!(o.upgrade, None);
         assert_eq!(o.strict, None);
         assert_eq!(o.dotfiles_enabled, None);
-
-        let full = parse(&["nt", "apply", "--upgrade", "--strict", "--no-dotfiles"]);
-        let o = overrides_from(full.subcommand_matches("apply").unwrap());
-        assert_eq!(o.upgrade, Some(true));
-        assert_eq!(o.strict, Some(true));
-        assert_eq!(o.dotfiles_enabled, Some(false));
+        assert_eq!(o.prompt, None);
     }
 
     #[test]
-    fn apply_accepts_dry_run() {
-        let m = parse(&["nt", "apply", "--dry-run"]);
-        let sub = m.subcommand_matches("apply").unwrap();
+    fn run_options_are_set_when_given() {
+        let m = parse(&[
+            "nt",
+            "apply",
+            "--upgrade",
+            "--strict",
+            "--no-dotfiles",
+            "--prompt",
+            "oh-my-posh",
+        ]);
+        let o = overrides_from(m.subcommand_matches("apply").unwrap());
 
-        assert!(sub.get_flag("dry-run"));
+        assert_eq!(o.upgrade, Some(true));
+        assert_eq!(o.strict, Some(true));
+        assert_eq!(o.dotfiles_enabled, Some(false));
+        assert_eq!(o.prompt.as_deref(), Some("oh-my-posh"));
+    }
+
+    #[test]
+    fn an_unknown_prompt_is_rejected_by_the_parser() {
+        assert!(!accepted(&["nt", "apply", "--prompt", "p10k"]));
     }
 
     #[test]
@@ -290,6 +300,7 @@ mod tests {
             "status",
             "bundles",
             "config",
+            "shell-init",
             "version",
             "completions",
         ] {
@@ -298,198 +309,102 @@ mod tests {
     }
 
     #[test]
-    fn config_has_show_and_path_subcommands() {
-        // The bare `nt config` invocation is reserved for a future interface,
-        // so the foundation exposes explicit subcommands under it.
-        let cmd = command();
-        let config = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "config")
-            .unwrap();
-        let names: Vec<&str> = config.get_subcommands().map(|s| s.get_name()).collect();
-
-        assert!(names.contains(&"show"));
-        assert!(names.contains(&"path"));
-    }
-
-    #[test]
-    fn completions_requires_a_shell() {
-        assert!(
-            command()
-                .try_get_matches_from(["nt", "completions"])
-                .is_err()
-        );
-        assert!(
-            command()
-                .try_get_matches_from(["nt", "completions", "bash"])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn an_unknown_shell_is_rejected() {
-        assert!(
-            command()
-                .try_get_matches_from(["nt", "completions", "tcsh"])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn status_also_takes_bundle_flags() {
-        // status reports against the same resolved configuration as apply, so
-        // it has to accept the same overrides.
-        let m = parse(&["nt", "status", "--no-desktop"]);
-        let sub = m.subcommand_matches("status").unwrap();
-
-        assert_eq!(overrides_from(sub).bundles.get("desktop"), Some(&false));
-    }
-
-    #[test]
-    fn every_command_that_reports_resolved_state_accepts_bundle_flags() {
-        // Otherwise `nt bundles --aws` fails while `nt apply --aws` works,
-        // which breaks the parity the flags exist to provide.
-        for argv in [
-            vec!["nt", "apply", "--aws"],
-            vec!["nt", "status", "--aws"],
-            vec!["nt", "bundles", "--aws"],
-            vec!["nt", "config", "show", "--aws"],
-        ] {
-            assert!(
-                command().try_get_matches_from(&argv).is_ok(),
-                "{argv:?} should be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn the_output_format_is_accepted_on_every_subcommand() {
-        for argv in [
-            vec!["nt", "apply", "--output", "json"],
-            vec!["nt", "status", "--output", "json"],
-            vec!["nt", "bundles", "--output", "json"],
-            vec!["nt", "config", "show", "--output", "json"],
-        ] {
-            assert!(
-                command().try_get_matches_from(&argv).is_ok(),
-                "{argv:?} should be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn an_unknown_output_format_is_rejected() {
-        assert!(
-            command()
-                .try_get_matches_from(["nt", "bundles", "--output", "yaml"])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn verbosity_counts_up() {
-        // Not global, so it lands on the subcommand that declares it.
-        let m = parse(&["nt", "apply", "-vv"]);
-
-        assert_eq!(
-            m.subcommand_matches("apply").unwrap().get_count("verbose"),
-            2
-        );
-    }
-
-    #[test]
-    fn the_verbose_help_describes_raw_output_not_just_logging() {
-        // The flag changed meaning; the help has to say so.
-        let mut cmd = command();
-        let apply = cmd
-            .get_subcommands_mut()
-            .find(|s| s.get_name() == "apply")
-            .expect("apply subcommand");
-        let help = apply.render_long_help().to_string();
-
-        assert!(
-            help.contains("raw command output"),
-            "help should explain -v shows raw output, got:\n{help}"
-        );
+    fn completions_and_shell_init_require_a_known_shell() {
+        assert!(!accepted(&["nt", "completions"]));
+        assert!(accepted(&["nt", "completions", "bash"]));
+        assert!(!accepted(&["nt", "completions", "tcsh"]));
+        assert!(!accepted(&["nt", "shell-init"]));
+        assert!(accepted(&["nt", "shell-init", "bash"]));
+        assert!(!accepted(&["nt", "shell-init", "tcsh"]));
     }
 
     // --- flags belong only where they mean something ------------------------
 
     #[test]
-    fn version_takes_no_flags_at_all() {
-        // Its output is its entire purpose; every modifier is contradictory.
-        for flag in [
+    fn selection_flags_reach_every_command_that_reports_resolved_state() {
+        for argv in [
+            vec!["nt", "apply", "--only", "core"],
+            vec!["nt", "status", "--only", "core"],
+            vec!["nt", "bundles", "--only", "core"],
+            vec!["nt", "config", "show", "--only", "core"],
+        ] {
+            assert!(accepted(&argv), "{argv:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn detail_belongs_to_status_and_bundles_only() {
+        assert!(accepted(&["nt", "status", "--detail"]));
+        assert!(accepted(&["nt", "bundles", "--detail"]));
+        assert!(!accepted(&["nt", "apply", "--detail"]));
+        assert!(!accepted(&["nt", "config", "show", "--detail"]));
+    }
+
+    #[test]
+    fn run_options_belong_to_apply_only() {
+        for flag in ["--dry-run", "--upgrade", "--strict", "--no-dotfiles", "-q"] {
+            assert!(accepted(&["nt", "apply", flag]), "{flag}");
+            assert!(!accepted(&["nt", "status", flag]), "{flag} on status");
+            assert!(!accepted(&["nt", "bundles", flag]), "{flag} on bundles");
+        }
+        assert!(accepted(&["nt", "apply", "--prompt", "starship"]));
+        assert!(!accepted(&["nt", "bundles", "--prompt", "starship"]));
+    }
+
+    #[test]
+    fn version_and_completions_take_no_flags_at_all() {
+        for argv in [
             vec!["nt", "version", "-q"],
             vec!["nt", "version", "-v"],
             vec!["nt", "version", "--output", "json"],
             vec!["nt", "version", "--config", "/tmp/x.toml"],
-        ] {
-            assert!(
-                command().try_get_matches_from(&flag).is_err(),
-                "{flag:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn completions_takes_no_flags_either() {
-        // `--quiet` here would emit an empty completion script, silently.
-        for flag in [
             vec!["nt", "completions", "bash", "-q"],
             vec!["nt", "completions", "bash", "--output", "json"],
         ] {
-            assert!(
-                command().try_get_matches_from(&flag).is_err(),
-                "{flag:?} should be rejected"
-            );
+            assert!(!accepted(&argv), "{argv:?} should be rejected");
         }
     }
 
     #[test]
-    fn quiet_belongs_only_to_apply() {
-        // Only apply reports on work done, so only there does silence mean
-        // success. On a query command it just discards the answer.
-        assert!(
-            command()
-                .try_get_matches_from(["nt", "apply", "-q"])
-                .is_ok()
-        );
-
-        for argv in [
-            vec!["nt", "bundles", "-q"],
-            vec!["nt", "status", "-q"],
-            vec!["nt", "config", "show", "-q"],
-        ] {
-            assert!(
-                command().try_get_matches_from(&argv).is_err(),
-                "{argv:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn config_and_output_reach_every_command_that_reads_configuration() {
+    fn config_reaches_every_command_that_reads_configuration() {
         for argv in [
             vec!["nt", "apply", "--config", "/tmp/x.toml"],
             vec!["nt", "status", "--config", "/tmp/x.toml"],
             vec!["nt", "bundles", "--config", "/tmp/x.toml"],
             vec!["nt", "config", "path", "--config", "/tmp/x.toml"],
             vec!["nt", "config", "show", "--config", "/tmp/x.toml"],
+            vec!["nt", "shell-init", "bash", "--config", "/tmp/x.toml"],
         ] {
-            assert!(
-                command().try_get_matches_from(&argv).is_ok(),
-                "{argv:?} should be accepted"
-            );
+            assert!(accepted(&argv), "{argv:?} should be accepted");
         }
     }
 
     #[test]
-    fn verbosity_reaches_the_commands_that_run_subprocesses() {
-        for argv in [vec!["nt", "apply", "-v"], vec!["nt", "status", "-vv"]] {
-            assert!(
-                command().try_get_matches_from(&argv).is_ok(),
-                "{argv:?} should be accepted"
-            );
+    fn output_and_verbosity_reach_the_commands_that_produce_reports() {
+        for argv in [
+            vec!["nt", "apply", "--output", "json", "-vv"],
+            vec!["nt", "status", "--output", "json", "-v"],
+            vec!["nt", "bundles", "--output", "json"],
+            vec!["nt", "config", "show", "--output", "json"],
+        ] {
+            assert!(accepted(&argv), "{argv:?} should be accepted");
         }
+        assert!(!accepted(&["nt", "config", "path", "--output", "json"]));
+        assert!(!accepted(&["nt", "shell-init", "bash", "--output", "json"]));
+        assert!(!accepted(&["nt", "bundles", "--output", "yaml"]));
+    }
+
+    #[test]
+    fn help_does_not_list_a_flag_per_bundle() {
+        let mut cmd = command();
+        let apply = cmd
+            .get_subcommands_mut()
+            .find(|s| s.get_name() == "apply")
+            .unwrap();
+        let help = apply.render_long_help().to_string();
+
+        assert!(!help.contains("--no-core"), "{help}");
+        assert!(help.contains("--skip"), "{help}");
+        assert!(help.contains("raw command output"), "{help}");
     }
 }

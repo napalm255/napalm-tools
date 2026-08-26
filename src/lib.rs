@@ -1,5 +1,7 @@
 //! napalm-tools: fast, private, idempotent user-space system configuration.
 
+#![forbid(unsafe_code)]
+
 pub mod bundles;
 pub mod cli;
 pub mod config;
@@ -10,4 +12,5 @@ pub mod plan;
 pub mod platform;
 pub mod privilege;
 pub mod report;
+pub mod shell;
 pub mod ui;

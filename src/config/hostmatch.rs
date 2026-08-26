@@ -17,10 +17,10 @@ pub fn matches(pattern: &str, hostname: &str) -> Result<bool> {
 /// `NT_HOSTNAME` overrides, which keeps host-override behaviour testable
 /// without renaming the machine.
 pub fn hostname() -> String {
-    if let Ok(h) = std::env::var("NT_HOSTNAME") {
-        if !h.trim().is_empty() {
-            return h.trim().to_string();
-        }
+    if let Ok(h) = std::env::var("NT_HOSTNAME")
+        && !h.trim().is_empty()
+    {
+        return h.trim().to_string();
     }
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())

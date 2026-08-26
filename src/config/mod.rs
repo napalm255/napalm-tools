@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 pub use file::ConfigFile;
-pub use merge::{CliOverrides, DotfilesConfig, Resolved, resolve};
+pub use merge::{CliOverrides, DotfilesConfig, PROMPTS, Resolved, resolve};
 
 /// Where the configuration file lives, given the relevant environment.
 ///
@@ -26,10 +26,10 @@ pub fn path_from_env(xdg_config_home: Option<&str>, home: Option<&str>) -> PathB
 /// `NT_CONFIG` overrides the XDG location, which keeps integration tests from
 /// depending on the invoking user's real configuration.
 pub fn default_path() -> PathBuf {
-    if let Ok(p) = std::env::var("NT_CONFIG") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Ok(p) = std::env::var("NT_CONFIG")
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
     }
     path_from_env(
         std::env::var("XDG_CONFIG_HOME").ok().as_deref(),

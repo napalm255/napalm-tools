@@ -1,46 +1,37 @@
 # napalm-tools configuration.
 #
-# Copy to ~/.config/napalm-tools/config.toml and edit. Every setting here has a
-# matching command-line flag, and the flag always wins.
+# Copy to ~/.config/napalm-tools/config.toml and edit. Nothing here is
+# required: with no file at all, `nt apply` installs every bundle the platform
+# can host, with starship as the prompt.
 #
-# `nt bundles` shows the catalog and each bundle's effective state on this
-# machine; `nt config show` shows the fully resolved configuration.
+# `nt bundles --detail` shows the catalog; `nt config show` shows the fully
+# resolved configuration; `nt status` compares it with the machine.
 
 # --- Bundles ---------------------------------------------------------------
-# A name not in the catalog is an error, not a silent no-op.
+# Every bundle is on. Name one here only to turn it off. A name not in the
+# catalog is an error, not a silent no-op. Bundles that need a desktop
+# session (desktop, fonts) are skipped automatically on servers, in
+# containers and under WSL.
 
 [bundles]
-core           = true    # terminal and git essentials
-shell          = true    # shellcheck, shfmt
-security       = true    # trivy, gitleaks, osv-scanner, semgrep, syft, grype, hadolint
-ai             = true    # Claude Code, Copilot, Codex, Antigravity
+android = false          # a large download; off on this machine
 
-# Language tooling: linters, type checkers and vulnerability scanners.
-go             = false
-rust           = false
-python         = false
-node           = false
-web            = false
-data           = false
+# --- Shell -----------------------------------------------------------------
+# One of: starship (default), oh-my-posh, powerbash. Only the chosen prompt is
+# installed, and `nt shell-init bash` prints the line that activates it.
 
-# Language runtimes, kept separate: mise manages runtimes where it is in use,
-# and two things managing one runtime means PATH order decides the winner.
-go-runtime     = false
-rust-runtime   = false
-python-runtime = false
-node-runtime   = false
-
-aws            = false   # awscli, aws-sam-cli, cfn-lint
-desktop        = false   # flatpak applications and desktop helpers
-fonts          = false   # Nerd Fonts and programming typefaces
+[shell]
+prompt = "starship"
 
 # --- Extra packages --------------------------------------------------------
 # The escape hatch: packages outside the catalog, named per manager. Unlike
 # catalog packages these have no fallback, so the manager must be usable here.
-# Managers: brew, brew-cask, npm, bun, flatpak, dnf
+# Managers: brew, brew-cask, npm, bun, flatpak, mise, dnf
+# mise entries are tool@version, as `mise use` takes them.
 
 [extra]
 brew = ["jless", "dust"]
+mise = ["terraform@latest"]
 
 # --- Run options -----------------------------------------------------------
 
@@ -49,7 +40,7 @@ brew = ["jless", "dust"]
 # stays fast and never pulls a breaking update at an awkward moment.
 upgrade = false
 
-# Exit non-zero when a package has no provider on this host. Useful in CI.
+# Exit 2 when a package has no provider on this host. Useful in CI.
 strict = false
 
 # --- Dotfiles --------------------------------------------------------------
@@ -64,14 +55,13 @@ apply   = true
 # --- Per-host overrides ----------------------------------------------------
 # Each key is a glob matched against the machine's hostname (the full FQDN).
 # Tables apply in FILE ORDER and later matches win, so write them general
-# first, specific last. There is no hidden specificity ranking: what you read
-# top to bottom is what happens.
+# first, specific last. There is no hidden specificity ranking.
 
 [host."*.naponline.net"]
-bundles = { desktop = true, fonts = true, go = true, rust = true, python = true }
+bundles = { android = true }
 
 [host."wsl-*"]
-bundles = { desktop = false, fonts = false }
+shell = { prompt = "oh-my-posh" }
 
 [host."build-*"]
 bundles  = { ai = false }

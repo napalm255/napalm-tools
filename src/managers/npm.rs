@@ -44,23 +44,26 @@ impl Manager for Npm {
         // `npm ls` exits non-zero when the global tree has any problem, even a
         // benign one, so its status is deliberately ignored in favour of
         // whatever JSON it produced.
-        let out = Cmd::new("npm", ["ls", "-g", "--depth=0", "--json"])
+        let cmd = Cmd::new("npm", ["ls", "-g", "--depth=0", "--json"]);
+        let out = cmd
             .to_command()
             .output()
             .context("failed to run `npm ls -g --depth=0 --json`")?;
+        if !out.status.success() {
+            tracing::debug!(
+                status = %out.status,
+                "npm ls exited non-zero; using whatever JSON it produced"
+            );
+        }
         parse_global_json(&String::from_utf8_lossy(&out.stdout))
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["install".to_string(), "-g".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("npm", args)
+        Cmd::with_packages("npm", &["install", "-g"], packages)
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["update".to_string(), "-g".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("npm", args)
+        Cmd::with_packages("npm", &["update", "-g"], packages)
     }
 }
 

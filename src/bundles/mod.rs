@@ -91,19 +91,49 @@ impl Pkg {
     }
 }
 
-/// A named, toggleable group of packages.
+/// Which of a bundle's packages are wanted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selector {
+    /// Every package.
+    All,
+    /// Only the package named by the resolved `[shell] prompt`.
+    Prompt,
+}
+
+/// A named group of packages. Every bundle is on unless the platform cannot
+/// host it or the configuration turns it off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bundle {
-    /// Kebab-case name; also the `--name` / `--no-name` CLI flag.
+    /// Kebab-case name; also the value `--skip` and `--only` take.
     pub name: &'static str,
-    /// One-line description, shown in `--help` and `nt bundles`.
+    /// One-line description, shown in `nt bundles`.
     pub description: &'static str,
-    /// Whether the bundle is on when nothing says otherwise.
-    pub default_enabled: bool,
     /// Platforms the bundle applies to.
     pub platforms: Platforms,
+    /// Which of its packages are wanted.
+    pub selector: Selector,
     /// Packages in the bundle.
     pub packages: &'static [Pkg],
+}
+
+impl Bundle {
+    /// The packages this bundle wants, given the selected prompt.
+    pub fn wanted(&self, prompt: &str) -> impl Iterator<Item = &'static Pkg> + '_ {
+        let prompt = prompt.to_string();
+        self.packages.iter().filter(move |p| match self.selector {
+            Selector::All => true,
+            Selector::Prompt => p.name == prompt,
+        })
+    }
+}
+
+/// Every bundle name, comma-separated, for error messages.
+pub fn names() -> String {
+    BUNDLES
+        .iter()
+        .map(|b| b.name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Look a bundle up by name.
@@ -115,16 +145,7 @@ pub fn find(name: &str) -> Option<&'static Bundle> {
 mod tests {
     use super::*;
 
-    const ATOMIC: Platform = Platform {
-        fedora_family: true,
-        atomic: true,
-        wsl: false,
-    };
-    const PLAIN: Platform = Platform {
-        fedora_family: true,
-        atomic: false,
-        wsl: false,
-    };
+    use crate::platform::test_platforms::{ATOMIC, PLAIN};
 
     static BREW_THEN_DNF: &[Provider] = &[
         Provider::new(ManagerId::Brew, "ripgrep"),
@@ -221,5 +242,21 @@ mod tests {
     #[test]
     fn find_returns_none_for_an_unknown_name() {
         assert!(find("no-such-bundle").is_none());
+    }
+
+    #[test]
+    fn a_prompt_bundle_wants_only_the_selected_prompt() {
+        let b = find("prompt").unwrap();
+
+        let wanted: Vec<&str> = b.wanted("oh-my-posh").map(|p| p.name).collect();
+
+        assert_eq!(wanted, vec!["oh-my-posh"]);
+    }
+
+    #[test]
+    fn an_ordinary_bundle_wants_everything_whatever_the_prompt() {
+        let b = find("shell").unwrap();
+
+        assert_eq!(b.wanted("starship").count(), b.packages.len());
     }
 }

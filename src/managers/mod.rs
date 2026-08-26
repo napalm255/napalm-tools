@@ -5,6 +5,7 @@ pub mod brew_cask;
 pub mod bun;
 pub mod dnf;
 pub mod flatpak;
+pub mod mise;
 pub mod npm;
 
 use anyhow::{Context, Result};
@@ -29,6 +30,8 @@ pub enum ManagerId {
     Bun,
     /// Flatpak.
     Flatpak,
+    /// mise, for language toolchains. Ids are `tool@version`.
+    Mise,
     /// dnf. Never available on ostree-based systems.
     Dnf,
 }
@@ -41,6 +44,7 @@ impl ManagerId {
         ManagerId::Npm,
         ManagerId::Bun,
         ManagerId::Flatpak,
+        ManagerId::Mise,
         ManagerId::Dnf,
     ];
 
@@ -52,8 +56,23 @@ impl ManagerId {
             ManagerId::Npm => "npm",
             ManagerId::Bun => "bun",
             ManagerId::Flatpak => "flatpak",
+            ManagerId::Mise => "mise",
             ManagerId::Dnf => "dnf",
         }
+    }
+
+    /// The manager named `name` in configuration or output.
+    pub fn from_name(name: &str) -> Option<ManagerId> {
+        ManagerId::ALL.iter().copied().find(|m| m.as_str() == name)
+    }
+
+    /// Every name, comma-separated, for error messages.
+    pub fn names() -> String {
+        ManagerId::ALL
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -77,6 +96,11 @@ pub struct Cmd {
     /// credential is bound to the terminal it was entered on. Every other
     /// command is detached, so an unexpected prompt fails instead of hanging.
     pub privileged: bool,
+    /// Directory to run in, when it matters. mise reads the current
+    /// directory's project configuration - and refuses untrusted files - so
+    /// its commands run from the home directory, where only the global
+    /// configuration applies.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl Cmd {
@@ -90,13 +114,38 @@ impl Cmd {
             program: program.to_string(),
             args: args.into_iter().map(|a| a.as_ref().to_string()).collect(),
             privileged: false,
+            cwd: None,
         }
+    }
+
+    /// A command of the shape `program fixed-args... packages...`, which is
+    /// what every manager's install and upgrade command looks like.
+    pub fn with_packages(program: &str, fixed: &[&str], packages: &[String]) -> Cmd {
+        let args = fixed
+            .iter()
+            .map(|a| (*a).to_string())
+            .chain(packages.iter().cloned());
+        Cmd::new(program, args)
     }
 
     /// Mark the command as one that may need elevated privileges.
     pub fn privileged(mut self) -> Cmd {
         self.privileged = true;
         self
+    }
+
+    /// Run the command from `dir` rather than the current directory.
+    pub fn in_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Cmd {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    /// Run the command from the user's home directory, if `HOME` is set.
+    pub fn in_home(self) -> Cmd {
+        match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            Some(home) => self.in_dir(home),
+            None => self,
+        }
     }
 
     /// Render as a shell-quoted command line, for display.
@@ -121,17 +170,26 @@ impl Cmd {
 
     /// Build the process command, detaching from the terminal or not.
     fn build_command(&self, detach: bool) -> std::process::Command {
+        // Resolve through the known tool directories as well as PATH, so a
+        // manager installed moments ago by the bootstrap phase is found even
+        // though this shell's PATH predates it.
+        let program = resolve_program(&self.program)
+            .map(|p| p.into_os_string())
+            .unwrap_or_else(|| self.program.clone().into());
         let mut c = if !detach || !setsid_available() {
-            let mut c = std::process::Command::new(&self.program);
+            let mut c = std::process::Command::new(&program);
             c.args(&self.args);
             c
         } else {
             let mut c = std::process::Command::new(SETSID);
             // `--wait` makes setsid exit with the child's status rather than
             // its own, so the outcome is still the command's.
-            c.arg("--wait").arg(&self.program).args(&self.args);
+            c.arg("--wait").arg(&program).args(&self.args);
             c
         };
+        if let Some(dir) = &self.cwd {
+            c.current_dir(dir);
+        }
         non_interactive_env(&mut c);
         c
     }
@@ -237,12 +295,7 @@ impl Cmd {
     /// into an ordinary non-zero exit, losing the distinction between a
     /// command that failed and one that was never there.
     fn ensure_program_exists(&self) -> Result<()> {
-        let found = if self.program.contains('/') {
-            std::path::Path::new(&self.program).is_file()
-        } else {
-            on_path(&self.program)
-        };
-        if found {
+        if resolve_program(&self.program).is_some() {
             Ok(())
         } else {
             anyhow::bail!("`{}` is not installed or not on PATH", self.program)
@@ -252,6 +305,8 @@ impl Cmd {
     /// Run the command, returning its stdout. Fails with the captured stderr
     /// tail so a subprocess failure is diagnosable from the error alone.
     pub fn output(&self) -> Result<String> {
+        self.ensure_program_exists()?;
+        tracing::debug!(command = %self.to_shell(), "querying");
         let out = self
             .to_command()
             .output()
@@ -280,6 +335,7 @@ pub fn get(id: ManagerId) -> Box<dyn Manager> {
         ManagerId::Npm => Box::new(npm::Npm),
         ManagerId::Bun => Box::new(bun::Bun),
         ManagerId::Flatpak => Box::new(flatpak::Flatpak),
+        ManagerId::Mise => Box::new(mise::Mise),
         ManagerId::Dnf => Box::new(dnf::Dnf),
     }
 }
@@ -367,16 +423,52 @@ fn shell_quote(word: &str) -> String {
     }
 }
 
-/// Whether `binary` is present on `PATH`.
+/// Whether `binary` is present on `PATH` or in a known tool directory.
 pub fn on_path(binary: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                let candidate = dir.join(binary);
-                candidate.is_file()
-            })
-        })
-        .unwrap_or(false)
+    resolve_program(binary).is_some()
+}
+
+/// Locate `program`: an explicit path as given, otherwise the first
+/// executable of that name on `PATH` or in one of the directories the
+/// managers `nt` bootstraps install into. Those directories are checked
+/// because a freshly installed manager is not yet on the PATH of the shell
+/// that installed it.
+pub fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        let p = std::path::PathBuf::from(program);
+        return is_executable(&p).then_some(p);
+    }
+    let path_dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    path_dirs
+        .into_iter()
+        .chain(known_tool_dirs())
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Directories that the bootstrapped managers install into.
+///
+/// `NT_TOOL_DIRS` (colon-separated, may be empty) overrides the list so a
+/// test can simulate a host that has none of them.
+pub fn known_tool_dirs() -> Vec<std::path::PathBuf> {
+    if let Some(list) = std::env::var_os("NT_TOOL_DIRS") {
+        return std::env::split_paths(&list).collect();
+    }
+    let mut dirs = vec![std::path::PathBuf::from("/home/linuxbrew/.linuxbrew/bin")];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".local/share/mise/shims"));
+    }
+    dirs
+}
+
+/// A regular file with an execute bit for someone.
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// A package manager `nt` can query and drive.
@@ -431,6 +523,23 @@ pub trait Manager {
     fn trusted_taps(&self) -> Result<HashSet<String>> {
         Ok(HashSet::new())
     }
+
+    /// Remotes configured for installs. Only meaningful for Flatpak, whose
+    /// user scope starts with none.
+    fn remotes(&self) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
+
+    /// Command to add the remote installs come from. Only meaningful for
+    /// Flatpak.
+    fn add_remote_cmd(&self) -> Option<Cmd> {
+        None
+    }
+
+    /// The name of the remote installs come from, if the manager has one.
+    fn remote_name(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -477,7 +586,57 @@ mod tests {
     fn manager_names_round_trip() {
         for m in ManagerId::ALL {
             assert_eq!(m.to_string(), m.as_str());
+            assert_eq!(ManagerId::from_name(m.as_str()), Some(*m));
         }
+        assert_eq!(ManagerId::from_name("pacman"), None);
+    }
+
+    #[test]
+    fn with_packages_appends_packages_after_the_fixed_arguments() {
+        let c = Cmd::with_packages("brew", &["install", "--cask"], &["a".into(), "b".into()]);
+
+        assert_eq!(c.to_shell(), "brew install --cask a b");
+    }
+
+    #[test]
+    fn a_command_can_be_run_from_another_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = Vec::new();
+
+        Cmd::new("sh", ["-c", "pwd"])
+            .in_dir(dir.path())
+            .run_captured(|l| seen.push(l.to_string()))
+            .unwrap();
+
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(seen, vec![real.to_string_lossy().to_string()]);
+    }
+
+    #[test]
+    fn a_non_executable_file_is_not_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("nt-plain-file"), "").unwrap();
+
+        assert!(!is_executable(&dir.path().join("nt-plain-file")));
+        assert!(is_executable(std::path::Path::new("/bin/sh")));
+    }
+
+    #[test]
+    fn an_explicit_path_resolves_to_itself() {
+        assert_eq!(
+            resolve_program("/bin/sh"),
+            Some(std::path::PathBuf::from("/bin/sh"))
+        );
+        assert!(resolve_program("/nonexistent/prog").is_none());
+    }
+
+    #[test]
+    fn output_of_a_missing_program_is_an_error_naming_it() {
+        let err = Cmd::new("nt-no-such-program-exists", ["x"])
+            .output()
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not installed"), "got {err:#}");
     }
 
     #[test]
@@ -697,7 +856,12 @@ mod tests {
         let detached = cmd.to_command();
         let attached = cmd.build_command(false);
 
-        assert_eq!(attached.get_program(), "sh");
+        assert_eq!(
+            std::path::Path::new(attached.get_program())
+                .file_name()
+                .unwrap(),
+            "sh"
+        );
         assert_eq!(detached.get_program(), SETSID, "ordinary runs detach");
     }
 }

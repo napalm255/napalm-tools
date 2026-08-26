@@ -1,257 +1,262 @@
 # napalm-tools
 
-Fast, private, idempotent user-space system configuration for Linux. Binary: `nt`.
+Fast, private, idempotent user-space system configuration for Linux. Binary:
+`nt`.
 
-`nt` provisions a workstation entirely in user space. On an atomic Fedora
-system (Bluefin, Silverblue) it never touches the immutable OS tree; on a
-traditional Fedora install or under WSL it uses the same catalog and adapts
-what it reaches for. Nothing is sent anywhere — there is no telemetry and no
-network access beyond the package managers it drives.
+`nt` is an opinionated setup tool. Run it on a fresh machine and you get every
+language toolchain and its supporting tools, the security scanners, the AI
+agents, a shell prompt, and your dotfiles - in user space, from Homebrew and
+mise, with `dnf` only as a gated last resort. Run it again and it does
+nothing, quickly.
+
+It targets Fedora Workstation, Fedora Server, the official Fedora container
+image, Fedora under WSL, and Bluefin (Fedora atomic). On an atomic host it
+never touches the immutable OS tree. Nothing is sent anywhere: no telemetry,
+and no network access beyond the package managers it drives.
 
 ## Quick start
 
 ```bash
 cargo build --release
-cp config.example.toml ~/.config/napalm-tools/config.toml
-
-nt bundles              # what is in the catalog, and its state on this host
-nt apply --dry-run      # what would change
-nt apply                # make it so
+./target/release/nt apply --dry-run   # what would change, including bootstrap
+./target/release/nt apply             # make it so
+./target/release/nt status            # where things stand
 ```
+
+No configuration file is needed. To turn something off, or pick a different
+prompt, copy [`config.example.toml`](config.example.toml) to
+`~/.config/napalm-tools/config.toml`.
 
 ## Commands
 
 | Command | Does |
 | --- | --- |
-| `nt apply` | Converge this machine on the resolved configuration |
-| `nt status` | Report desired versus installed state; changes nothing |
-| `nt bundles` | List bundles and their effective state here |
-| `nt config show` | Print the fully resolved configuration |
-| `nt config path` | Print the configuration file path |
-| `nt version` | Print the version alone, for scripts |
-| `nt completions <shell>` | Generate completions for bash, zsh or fish |
+| `nt apply` | Bootstrap the managers if needed, then converge on the configuration |
+| `nt status` | Desired versus installed, per bundle; `--detail` for every package |
+| `nt bundles` | The catalog and each bundle's state here; `--detail` for packages and providers |
+| `nt config show` | The fully resolved configuration |
+| `nt config path` | The configuration file path |
+| `nt shell-init <shell>` | The line that activates the configured prompt |
+| `nt version` | The version alone, for scripts |
+| `nt completions <shell>` | Completions for bash, zsh or fish |
 
-`nt apply` takes `--dry-run`, `--upgrade`, `--strict` and `--no-dotfiles`, plus
-a generated `--<bundle>` / `--no-<bundle>` pair for every bundle in the catalog.
+Flags appear only where they do something:
 
-## Output
+| Flag | Commands |
+| --- | --- |
+| `--config`, `--output pretty\|plain\|json`, `-v` | apply, status, bundles, config show |
+| `--skip <bundle>`, `--only <bundle>` (repeatable) | apply, status, bundles, config show |
+| `--detail` | status, bundles |
+| `--dry-run`, `--upgrade`, `--strict`, `--no-dotfiles`, `--prompt`, `-q` | apply |
 
-Subprocess output is captured, not inherited. A run shows what step it is on
-and how long each took, and the managers' several hundred lines of chatter stay
-out of the way unless something in them matters.
+`nt version -q` is an error, not a no-op. Bundle and prompt names are
+validated as they are parsed, so completions offer them and a typo fails.
 
-```
-  [1/1] brew install nmap inetutils ok (7.1s)
+## What `apply` does
 
-1 step in 7.1s
+Three phases, and `--dry-run` shows all three.
 
-warnings:
-  Warning: The following taps are not trusted:
-    someone/tap
-```
+1. **Bootstrap.** If Homebrew is missing it is installed - its prerequisites
+   from `dnf` where dnf is usable, then the official installer. If mise is
+   missing it comes from Homebrew. On Bluefin both are already there, so this
+   phase is empty.
+2. **Snapshot.** One bulk query per manager: what is installed, which taps
+   exist and are trusted, which flatpak remotes the user scope has, which
+   catalog binaries are on `PATH`. A converged machine re-runs in the time
+   it takes those managers to start.
+3. **Converge.** One install command per manager, preceded by whatever it
+   needs: the Flathub remote in the user scope, a tap, trusting the tap.
+   Then the dotfiles step.
 
-Two rules govern where things go:
-
-- **stdout is the answer** - the rendered plan, the notes, any JSON, nothing
-  else. `nt bundles --output json > file` produces a file that parses.
-- **stderr is everything else** - progress, warnings, caveats, timings, errors.
-
-`--output` selects `pretty`, `plain` or `json`; without it, `pretty` when
-stderr is a terminal and `plain` otherwise, so pipes and CI logs stay readable.
-
-| flag | subprocess output | logging |
-| --- | --- | --- |
-| *(none)* | captured, hidden behind a spinner | warnings |
-| `-q` | captured, hidden, no progress | errors only |
-
-`-q` belongs to `nt apply` alone, the only command that reports on work
-done and so the only one where silence can mean success. A failure still
-reports.
-
-Flags are declared per command rather than globally, so a combination that
-could only contradict itself is refused rather than accepted and ignored:
-`nt version` takes no flags at all, and neither does `nt completions`.
-`--config`, `--output` and `-v` reach every command that resolves
-configuration.
-| `-v` | raw passthrough, terminal handed over, spinner off | info |
-| `-vv` | raw passthrough | debug |
-
-Homebrew's `==> Caveats` blocks and deprecation warnings are collected while
-scrolling past and shown once at the end, where they can be read.
-
-### Commands that want to ask a question
-
-Closing stdin does not stop a prompt: `sudo`, `ssh`, `gpg` and `git` read from
-`/dev/tty` directly. A prompt would therefore appear beneath the live spinner,
-garbled or invisible, while the run waited forever.
-
-So ordinary steps are detached from the controlling terminal. A command that
-tries to prompt fails immediately with a readable message instead of hanging,
-and the error says how to answer it:
+`apply` refuses to run as root. Homebrew refuses too, and a root-owned
+`~/.local` is a trap for every tool that comes after.
 
 ```
-  [3/3] chezmoi apply FAILED (0.3s)
-error: `chezmoi apply` exit status: 1
-  sudo: a terminal is required to read the password
+$ nt apply --dry-run
+Dry run - no changes will be made.
+🧰 Bootstrap:
+  + sudo dnf install -y procps-ng curl file git gcc
+  + bash -c 'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | NONINTERACTIVE=1 bash'
+  + brew install mise
 
-hint: this command wanted to prompt; re-run with -v to give it the terminal
+⬇️  Steps (61 packages to install):
+  + flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  + brew tap powertmux/powertmux
+  + brew trust --tap powertmux/powertmux
+  + brew install ripgrep fd bat ...
+  + mise use --global --yes go@latest rust@stable python@3.13 node@lts ...
 ```
 
-Steps that may *legitimately* need privileges are handled differently. `nt`
-works out in advance whether a run needs a password - dnf actions always do,
-and chezmoi is checked by scanning its `run_` scripts for `sudo` - and if so
-asks once, before anything executes and before the spinner starts. A refused
-password then costs nothing, because nothing has run.
+## Bundles
 
-Those steps keep the terminal, since sudo's cached credential is bound to the
-terminal it was entered on. `nt apply --dry-run --output json` reports which
-steps are `privileged`, so you can see what a run will ask for before starting
-it.
+Every bundle is on. The only things that turn one off are the platform, a
+`[bundles] name = false` line, or `--skip` / `--only` for a run.
 
-The scan of your chezmoi scripts is a heuristic, and a shallow one: they are
-your scripts, so the only way to know is to look. A false positive costs one
-unnecessary prompt; a false negative leaves that step prompting on a terminal
-it still has.
+| Bundle | Contents |
+| --- | --- |
+| `core` | Terminal and git essentials: ripgrep, fd, bat, eza, zoxide, fzf, jq, yq, delta, gh, chezmoi, just, mise, tmux, nmap, ... |
+| `shell` | shellcheck, shfmt |
+| `prompt` | The one prompt named by `[shell] prompt`: starship (default), oh-my-posh or powerbash |
+| `security` | trivy, gitleaks, osv-scanner, semgrep, syft, grype, hadolint |
+| `ai` | Claude Code, GitHub Copilot CLI, Codex, Antigravity |
+| `go` | go (mise), golangci-lint, govulncheck, gopls, goreleaser, delve |
+| `rust` | rust stable (mise), cargo-audit, cargo-deny, cargo-nextest, cargo-binstall, cargo-llvm-cov, cargo-outdated, bacon, sccache, taplo, rust-analyzer |
+| `python` | python 3.13 (mise), uv, ruff, mypy, pip-audit, pyright |
+| `node` | node LTS, bun, deno (mise), pnpm, biome, oxlint, typescript, prettier |
+| `java` | Amazon Corretto 21, Maven, Gradle, Kotlin, ktlint (all mise) |
+| `dotnet` | .NET 10 SDK (mise) |
+| `ruby` | ruby (mise) |
+| `zig` | zig (mise), zls |
+| `php` | php, composer |
+| `lua` | lua, luarocks, stylua, lua-language-server |
+| `perl` | perl |
+| `elixir` | erlang, elixir |
+| `powershell` | pwsh |
+| `android` | Google's `android` CLI (mise), scrcpy, Android Studio (flatpak, desktop only) |
+| `web` | stylelint, htmlq, pandoc, pa11y |
+| `data` | miller, duckdb, qsv, sqlite, sqlite-utils |
+| `aws` | awscli, aws-sam-cli, cfn-lint |
+| `desktop` | Flatpak applications; needs a desktop session |
+| `fonts` | Nerd Fonts; needs a desktop session |
 
-### Machine-readable
+`nt bundles --detail` lists every package with its providers.
 
-`nt` holds its catalog to a standard - machine-readable output, non-interactive,
-meaningful exit codes - so it meets it too.
+**Homebrew** supplies command-line tools: bottled for Linux, no sudo. **mise**
+supplies language toolchains and anything that wants a JDK, pinned per user
+in its global config; the Kotlin, Gradle and Maven formulae would each pull
+Homebrew's own OpenJDK in beside Corretto, so they come through mise against
+the Corretto it installs. A mise package is satisfied only by mise's own
+listing - "some `go` on PATH" is not "the `go` we asked for". For everything
+else, an executable already on `PATH` counts, whatever put it there: the OS
+image, a vendor script, another manager. That is what keeps `nt` from
+installing a second `jq` beside the one Bluefin ships, or a second Claude
+Code beside the self-updating one.
+
+The `android` bundle installs Google's unified `android` command-line tool,
+which manages the SDK, emulators and projects. SDK components themselves are
+not installed, because that requires accepting licences and should be a
+deliberate act: `android init`, then `android sdk install`.
+
+Every third-party package is vetted against the project's dependency rules -
+1000+ stars, a push within six months, not archived, compatible licence -
+with a carve-out for first-party tooling (`govulncheck`, Corretto). The full
+record, and what was rejected, is in [`AGENTS.md`](AGENTS.md).
+
+## Shell prompt
+
+```toml
+[shell]
+prompt = "starship"   # or "oh-my-posh" or "powerbash"
+```
+
+Only the chosen prompt is installed. In your shell's start-up file:
 
 ```bash
-nt bundles --output json | jq -r '.bundles[] | select(.enabled) | .name'
-nt apply --dry-run --output json | jq -r '.actions[].command'
-nt apply --dry-run --output json | jq '.unavailable[] | {package, reason}'
+eval "$(nt shell-init bash)"
 ```
 
-## How it decides
+Changing the prompt is then a configuration change, not an edit to three
+files. `powerbash` is bash-only and `shell-init` says so for any other shell.
 
-Configuration is layered, lowest to highest:
+## Platforms
 
-```
-catalog defaults -> [bundles] etc. -> matching [host."glob"] tables, in file order -> CLI flags
-```
+`nt` detects five facts and everything follows from them:
 
-Host tables are applied **in the order they appear in the file**, so later
-entries win. Write them general first, specific last. There is no hidden
-specificity ranking.
+| Fact | From | Effect |
+| --- | --- | --- |
+| `fedora_family` | `/etc/os-release` `ID` or `ID_LIKE` | `dnf` is a possible last resort |
+| `atomic` | `/run/ostree-booted` exists | `dnf` is refused even though it is on `PATH`; bootstrap skips its prerequisites |
+| `wsl` | `$WSL_DISTRO_NAME` or `microsoft` in the kernel version | Never graphical |
+| `container` | `/run/.containerenv` or `/.dockerenv` | Never graphical |
+| `graphical` | `/usr/share/wayland-sessions` or `/usr/share/xsessions` has entries | `desktop`, `fonts`, Android Studio, flatpak at all |
 
-Each package declares an ordered list of providers, and `nt` takes the first
-one that is both permitted on this platform and backed by an available manager.
-That is how "Homebrew first, dnf as a last resort" is expressed — as data,
-per package, rather than as a global rule.
-
-If no provider applies, the package is reported as unavailable and skipped.
-It is never installed by some other route.
-
-In practice every catalog package resolves through Homebrew, so `dnf` is
-genuinely a last resort: it is reached only through `[extra]`, or on a host
-where Homebrew is absent.
+`graphical` is judged by files on disk rather than `$DISPLAY`, which is unset
+in exactly the shells - SSH, agents, cron - that most often run a setup tool.
 
 ### Why `dnf` is gated on the platform, not on `PATH`
 
 On Bluefin, `dnf` is on `PATH` and appears to work. Anything it installs is
 discarded at the next OS update. `nt` therefore refuses `dnf` on any
-ostree-booted host regardless of whether the binary exists:
+ostree-booted host regardless of whether the binary exists.
 
+### Flatpak
+
+Installs go to the user scope, so `nt` never mutates system state, and the
+user scope starts with no remotes, so `nt` adds Flathub to it first. The
+installed check consults both scopes and only applications - on a typical
+desktop the existing applications were installed system-wide, and the
+runtimes outnumber them.
+
+## Output
+
+**stdout is the answer** - the rendered plan, the status, any JSON. **stderr
+is everything else** - progress, warnings, timings, errors. `nt bundles
+--output json > file` produces a file that parses, and `nt bundles > file`
+never contains an escape sequence, however lively the terminal.
+
+`--output` selects `pretty`, `plain` or `json`; without it, `pretty` when
+stdout is a terminal and `plain` otherwise. Pretty output uses colour, and
+emoji where the terminal is UTF-8.
+
+Subprocess output is captured and shown behind a spinner; `-v` streams it
+through untouched and hands the terminal to the command, which is also how
+to answer a prompt one insists on. Homebrew's `==> Caveats` blocks and
+deprecation warnings are collected and shown once at the end.
+
+Steps that may need privileges - `dnf`, Homebrew's installer, a chezmoi run
+script that mentions `sudo` - are known in advance, so `nt` asks for the
+password once, before anything runs and before the spinner starts.
+
+```bash
+nt apply --dry-run --output json | jq -r '.actions[] | select(.privileged) | .command'
+nt status --output json | jq '.totals'
+nt status --output json | jq -r '.packages[] | select(.state == "missing") | .name'
+nt bundles --output json | jq -r '.bundles[] | select(.applicable | not) | "\(.name): \(.reason)"'
 ```
-$ cat ~/.config/napalm-tools/config.toml
-[extra]
-dnf = ["some-kernel-tool"]
-
-$ nt apply --dry-run          # on Bluefin
-Unavailable:
-  ! some-kernel-tool (extra): dnf is not available on this host
-```
-
-On a traditional Fedora host the same configuration plans
-`sudo dnf install -y some-kernel-tool`.
-
-### Flatpak scope
-
-Installs go to the user scope, so `nt` never mutates system state. The
-installed-check consults **both** scopes, because on a typical desktop the
-existing applications were installed system-wide — treating those as missing
-would mean reinstalling every one of them as a user copy.
-
-### Already present counts, whatever installed it
-
-A package may declare the executable it provides. If that binary resolves on
-`PATH`, the package is satisfied regardless of which manager - if any - put it
-there. This matters more than it sounds:
-
-- An atomic base image already ships `jq`, `git`, `vim`, `fzf`, `tmux` and
-  more. Without this rule `nt` installs brew copies that shadow them.
-- Claude Code installs itself into `~/.local/bin` and self-updates there.
-  Without this rule `nt` adds a second, staler copy via npm.
-- Formula names often differ from binary names: `ripgrep`/`rg`,
-  `git-delta`/`delta`, `tealdeer`/`tldr`, `miller`/`mlr`.
-
-On the development machine this prevents eight redundant installs on a default
-run. A manager that genuinely owns the package still takes precedence, so
-`--upgrade` keeps working.
-
-## Managers
-
-`brew`, `brew-cask`, `npm`, `bun`, `flatpak`, and `dnf` (traditional Fedora
-only). Each is queried in a single bulk call, so a converged machine re-runs in
-about the time it takes those managers to start.
-
-Formulae and casks are separate managers rather than one with a flag, because
-their namespaces genuinely collide: the formula `copilot` is the AWS ECS tool
-while the cask `copilot-cli` is GitHub Copilot.
-
-## Bundles
-
-Seventeen bundles, ninety-nine packages. `core`, `shell`, `security` and `ai` are on
-by default; everything else is opt-in.
-
-Language tooling is one bundle per language, so a machine that never touches Go
-skips that tooling entirely. Language *runtimes* are separate opt-in bundles,
-because `mise` manages runtimes where it is in use and two things managing one
-runtime means `PATH` order decides the winner.
-
-Every third-party package is checked against the project's dependency rules -
-1000+ stars, a commit within six months, not archived, compatible licence -
-with a carve-out for first-party tooling such as `govulncheck`. Packages
-considered and rejected are recorded in the design notes so they are not
-reintroduced.
-
-Tool selection favours machine-readable output (JSON or SARIF), non-interactive
-operation, precise `file:line:col` and single static binaries - which is why
-`ruff`, `biome`, `oxlint` and `uv` appear rather than their predecessors.
 
 ## Configuration
 
-See [`config.example.toml`](config.example.toml) for a documented example.
+See [`config.example.toml`](config.example.toml). Layers, lowest to highest:
 
-Environment overrides, mainly for testing: `NT_CONFIG`, `NT_HOSTNAME`,
-`NT_OS_RELEASE`, `NT_OSTREE_MARKER`.
+```
+catalog (everything on) -> [bundles] etc. -> matching [host."glob"] tables, in file order -> flags
+```
+
+Host tables apply in the order they appear in the file, so later entries win.
+`[extra]` names packages outside the catalog per manager (including `mise`
+as `tool@version`); they are validated so `"--force"` cannot become a flag
+on an install command.
+
+Environment overrides, for tests and for exercising another platform's code
+path: `NT_CONFIG`, `NT_HOSTNAME`, `NT_OS_RELEASE`, `NT_OSTREE_MARKER`,
+`NT_CONTAINER_MARKER`, `NT_SESSION_DIR`, `NT_TOOL_DIRS`.
 
 ## Development
 
 ```bash
-just            # list recipes
-just test       # unit and end-to-end tests
-just lint       # fmt --check + clippy -D warnings
-just security   # osv-scanner, gitleaks, trivy
-just ci         # all of the above
+mise install      # toolchain from mise.toml
+just setup        # cargo-deny, cargo-audit
+just ci           # lint, test, security
+just e2e-fedora   # a real `nt apply` inside the devcontainer image
+just e2e-bluefin  # the same inside a Bluefin image
 ```
 
-The decision engine is a pure function — `plan::build` takes resolved
-configuration, a platform, and a snapshot of installed packages, and returns a
-list of actions. `--dry-run` renders that list and a real run executes it, so
-the two cannot drift apart. It also means the interesting behaviour is testable
-without spawning a single subprocess.
+The repository ships a devcontainer (`.devcontainer/`) built from the official
+Fedora image, pinned by digest, with an ordinary user, passwordless sudo and
+mise. The unit and integration tests run inside it; the same image is what
+`just e2e-fedora` runs `nt apply` in, so the tests and the target are one
+thing. `just e2e-bluefin` does the same in a Bluefin image with the atomic
+marker set. CI runs lint, tests, cargo-deny, cargo-audit, and both end-to-end
+jobs.
 
-## Scope
+The decision engine is a pure function: `plan::build` takes resolved
+configuration, a platform and a snapshot and returns actions. `--dry-run`
+renders that list and a real run executes it, so the two cannot drift apart,
+and the interesting behaviour is testable without spawning a subprocess.
 
-This is the foundation: preferences, platform detection, package provisioning
-and the chezmoi bootstrap. Still to come, each as its own design: a compiled-in
-script system replacing `~/bin`, `nt --shell-init` replacing `.bashrc.d/`, and
-a terminal interface under the reserved bare `nt config`.
-
-Design notes live in [`docs/superpowers/specs/`](docs/superpowers/specs/).
+[`AGENTS.md`](AGENTS.md) describes the layout, the invariants, and how to add
+a package. Design records are in
+[`docs/superpowers/specs/`](docs/superpowers/specs/).
 
 ## Licence
 

@@ -13,17 +13,12 @@
 use anyhow::Result;
 use std::collections::HashSet;
 
-use super::{Cmd, Manager, ManagerId};
+use super::{Cmd, Manager, ManagerId, parse_lines};
 use crate::platform::Platform;
 
 /// The Homebrew cask manager.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BrewCask;
-
-/// Parse `brew list --cask -1` output into cask names.
-pub fn parse_list(output: &str) -> HashSet<String> {
-    super::parse_lines(output)
-}
 
 impl Manager for BrewCask {
     fn id(&self) -> ManagerId {
@@ -39,40 +34,23 @@ impl Manager for BrewCask {
     }
 
     fn installed(&self) -> Result<HashSet<String>> {
-        Ok(parse_list(
+        Ok(parse_lines(
             &Cmd::new("brew", ["list", "--cask", "-1"]).output()?,
         ))
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["install".to_string(), "--cask".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("brew", args)
+        Cmd::with_packages("brew", &["install", "--cask"], packages)
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["upgrade".to_string(), "--cask".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("brew", args)
+        Cmd::with_packages("brew", &["upgrade", "--cask"], packages)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_one_cask_per_line() {
-        let set = parse_list("copilot-cli\nfont-fira-code-nerd-font\n");
-
-        assert!(set.contains("copilot-cli"));
-        assert!(set.contains("font-fira-code-nerd-font"));
-    }
-
-    #[test]
-    fn empty_output_is_an_empty_set() {
-        assert!(parse_list("").is_empty());
-    }
 
     #[test]
     fn install_passes_the_cask_flag() {

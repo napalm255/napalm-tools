@@ -1,204 +1,156 @@
 //! The bundle catalog.
 //!
-//! This is data, not logic. Every third-party entry was checked against the
-//! project's dependency rules: at least 1000 GitHub stars, a commit within six
-//! months, not archived, and a compatible licence. Tooling published by a
-//! language or platform owner is judged on official status instead, which is
-//! why `govulncheck` (the Go team's own scanner, ~510 stars) is here.
+//! This is data, not logic, and it is opinionated: every bundle is on unless
+//! the platform cannot host it. Each third-party entry was checked on
+//! 2026-08-25 against the project's dependency rules - at least 1000 GitHub
+//! stars, a push within six months, not archived, a compatible licence - with
+//! the first-party carve-out for tooling published by a language or platform
+//! owner (`govulncheck`, Amazon Corretto). The full vetting table lives in
+//! `AGENTS.md`.
 //!
-//! Three candidates were rejected by those rules and are recorded here so they
-//! are not reintroduced:
+//! Two managers do most of the work. Homebrew supplies command-line tools:
+//! bottled for Linux, no sudo, broad coverage. mise supplies language
+//! toolchains and anything that needs a JDK, pinned per user; the Kotlin,
+//! Gradle and Maven formulae would each pull Homebrew's own OpenJDK in beside
+//! Corretto, so they come through mise against the Corretto it installs.
 //!
-//! - `pup` - the original is two years stale and the maintained fork sits just
-//!   under the star threshold. Replaced by `htmlq`, which does the same job.
-//! - `html2text` - no commit in ten months. Replaced by `pandoc`.
-//! - `tree` - an OS-native package, so the dependency ladder stops before
-//!   reaching Homebrew. `eza --tree` covers it in any case.
+//! Rejected under the rules, recorded so they are not reintroduced:
 //!
-//! Note also that the Homebrew *formula* `copilot` is the AWS ECS tool and its
-//! upstream is archived; GitHub Copilot is the *cask* `copilot-cli`. Formula
-//! and cask names are separate namespaces, which is why they are separate
-//! managers.
+//! - `pup` - stale original; the maintained fork sits under the star line.
+//!   `htmlq` does the job.
+//! - `html2text` - no commit in ten months. `pandoc` instead.
+//! - `tree` - OS-native, and `eza --tree` covers it.
+//! - `copilot` (formula) - the AWS ECS tool, archived. GitHub Copilot is the
+//!   *cask* `copilot-cli`.
+//! - `antigravity` (npm) - not Google's; a placeholder by an unrelated
+//!   maintainer. The cask `antigravity-cli` is the real one.
+//! - `netcat` (formula) - GNU netcat 0.7.1, dormant since 2004.
+//! - `telnet` (formula) - no bottle; `inetutils` supplies telnet.
+//! - `markdownlint-cli2` - 907 stars.
+//! - `cpanminus` - 782 stars.
+//! - `dive` - last push December 2025.
+//! - `pipenv` - removed; `uv` covers it.
 
-use super::{Bundle, Pkg, Provider};
+use super::{Bundle, Pkg, Provider, Selector};
 use crate::managers::ManagerId;
 use crate::platform::Platforms;
 
 // --- core -------------------------------------------------------------------
 
+macro_rules! brew_pkg {
+    ($name:literal) => {
+        Pkg {
+            name: $name,
+            binary: Some($name),
+            providers: &[Provider::new(ManagerId::Brew, $name)],
+        }
+    };
+    ($name:literal, bin = $bin:literal) => {
+        Pkg {
+            name: $name,
+            binary: Some($bin),
+            providers: &[Provider::new(ManagerId::Brew, $name)],
+        }
+    };
+    ($name:literal, formula = $formula:literal, bin = $bin:literal) => {
+        Pkg {
+            name: $name,
+            binary: Some($bin),
+            providers: &[Provider::new(ManagerId::Brew, $formula)],
+        }
+    };
+}
+
+/// A toolchain managed by mise. No `binary`: for a version-managed tool,
+/// "some `go` is on PATH" is not "the `go` we asked for", so only mise's own
+/// listing can satisfy it.
+macro_rules! mise_pkg {
+    ($name:literal, $spec:literal) => {
+        Pkg {
+            name: $name,
+            binary: None,
+            providers: &[Provider::new(ManagerId::Mise, $spec)],
+        }
+    };
+}
+
+macro_rules! npm_pkg {
+    ($name:literal, pkg = $pkg:literal, bin = $bin:literal) => {
+        Pkg {
+            name: $name,
+            binary: Some($bin),
+            providers: &[Provider::new(ManagerId::Npm, $pkg)],
+        }
+    };
+}
+
+macro_rules! cask_pkg {
+    ($name:literal) => {
+        Pkg {
+            name: $name,
+            binary: None,
+            providers: &[Provider::new(ManagerId::BrewCask, $name)],
+        }
+    };
+    ($name:literal, bin = $bin:literal) => {
+        Pkg {
+            name: $name,
+            binary: Some($bin),
+            providers: &[Provider::new(ManagerId::BrewCask, $name)],
+        }
+    };
+}
+
+macro_rules! flatpak_pkg {
+    ($name:literal, $id:literal) => {
+        Pkg {
+            name: $name,
+            binary: None,
+            providers: &[Provider::new(ManagerId::Flatpak, $id)],
+        }
+    };
+}
+
 static CORE: &[Pkg] = &[
-    Pkg {
-        name: "ripgrep",
-        binary: Some("rg"),
-        providers: &[Provider::new(ManagerId::Brew, "ripgrep")],
-    },
-    Pkg {
-        name: "fd",
-        binary: Some("fd"),
-        providers: &[Provider::new(ManagerId::Brew, "fd")],
-    },
-    Pkg {
-        name: "bat",
-        binary: Some("bat"),
-        providers: &[Provider::new(ManagerId::Brew, "bat")],
-    },
-    Pkg {
-        name: "eza",
-        binary: Some("eza"),
-        providers: &[Provider::new(ManagerId::Brew, "eza")],
-    },
-    Pkg {
-        name: "zoxide",
-        binary: Some("zoxide"),
-        providers: &[Provider::new(ManagerId::Brew, "zoxide")],
-    },
-    Pkg {
-        name: "fzf",
-        binary: Some("fzf"),
-        providers: &[Provider::new(ManagerId::Brew, "fzf")],
-    },
-    Pkg {
-        name: "jq",
-        binary: Some("jq"),
-        providers: &[Provider::new(ManagerId::Brew, "jq")],
-    },
-    Pkg {
-        name: "yq",
-        binary: Some("yq"),
-        providers: &[Provider::new(ManagerId::Brew, "yq")],
-    },
-    Pkg {
-        name: "sd",
-        binary: Some("sd"),
-        providers: &[Provider::new(ManagerId::Brew, "sd")],
-    },
-    Pkg {
-        name: "git-delta",
-        binary: Some("delta"),
-        providers: &[Provider::new(ManagerId::Brew, "git-delta")],
-    },
-    Pkg {
-        name: "hyperfine",
-        binary: Some("hyperfine"),
-        providers: &[Provider::new(ManagerId::Brew, "hyperfine")],
-    },
-    Pkg {
-        name: "tealdeer",
-        binary: Some("tldr"),
-        providers: &[Provider::new(ManagerId::Brew, "tealdeer")],
-    },
-    Pkg {
-        name: "vim",
-        binary: Some("vim"),
-        providers: &[Provider::new(ManagerId::Brew, "vim")],
-    },
-    Pkg {
-        name: "git",
-        binary: Some("git"),
-        providers: &[Provider::new(ManagerId::Brew, "git")],
-    },
-    Pkg {
-        name: "gh",
-        binary: Some("gh"),
-        providers: &[Provider::new(ManagerId::Brew, "gh")],
-    },
-    Pkg {
-        name: "chezmoi",
-        binary: Some("chezmoi"),
-        providers: &[Provider::new(ManagerId::Brew, "chezmoi")],
-    },
-    Pkg {
-        name: "just",
-        binary: Some("just"),
-        providers: &[Provider::new(ManagerId::Brew, "just")],
-    },
-    Pkg {
-        name: "mise",
-        binary: Some("mise"),
-        providers: &[Provider::new(ManagerId::Brew, "mise")],
-    },
-    Pkg {
-        name: "direnv",
-        binary: Some("direnv"),
-        providers: &[Provider::new(ManagerId::Brew, "direnv")],
-    },
-    Pkg {
-        name: "watchexec",
-        binary: Some("watchexec"),
-        providers: &[Provider::new(ManagerId::Brew, "watchexec")],
-    },
-    Pkg {
-        name: "tokei",
-        binary: Some("tokei"),
-        providers: &[Provider::new(ManagerId::Brew, "tokei")],
-    },
-    Pkg {
-        name: "lazygit",
-        binary: Some("lazygit"),
-        providers: &[Provider::new(ManagerId::Brew, "lazygit")],
-    },
-    Pkg {
-        name: "difftastic",
-        binary: Some("difft"),
-        providers: &[Provider::new(ManagerId::Brew, "difftastic")],
-    },
-    Pkg {
-        name: "actionlint",
-        binary: Some("actionlint"),
-        providers: &[Provider::new(ManagerId::Brew, "actionlint")],
-    },
-    Pkg {
-        name: "htop",
-        binary: Some("htop"),
-        providers: &[Provider::new(ManagerId::Brew, "htop")],
-    },
-    Pkg {
-        name: "btop",
-        binary: Some("btop"),
-        providers: &[Provider::new(ManagerId::Brew, "btop")],
-    },
-    Pkg {
-        name: "wget",
-        binary: Some("wget"),
-        providers: &[Provider::new(ManagerId::Brew, "wget")],
-    },
-    Pkg {
-        name: "curl",
-        binary: Some("curl"),
-        providers: &[Provider::new(ManagerId::Brew, "curl")],
-    },
-    Pkg {
-        name: "make",
-        binary: Some("make"),
-        providers: &[Provider::new(ManagerId::Brew, "make")],
-    },
-    Pkg {
-        name: "man-db",
-        binary: Some("man"),
-        providers: &[Provider::new(ManagerId::Brew, "man-db")],
-    },
-    Pkg {
-        name: "whois",
-        binary: Some("whois"),
-        providers: &[Provider::new(ManagerId::Brew, "whois")],
-    },
-    Pkg {
-        name: "nmap",
-        binary: Some("nmap"),
-        providers: &[Provider::new(ManagerId::Brew, "nmap")],
-    },
-    // GNU inetutils supplies telnet. The standalone `telnet` formula is a
-    // port of Apple's remote_cmds with no bottle, so it would build from
-    // source on Linux.
-    Pkg {
-        name: "telnet",
-        binary: Some("telnet"),
-        providers: &[Provider::new(ManagerId::Brew, "inetutils")],
-    },
-    // No maintained user-space provider: the `netcat` formula is GNU netcat
-    // 0.7.1, released in 2004 and dormant since. Distributions ship a current
-    // one, so this resolves through the binary check on any ordinary system
-    // and falls back to dnf where that is usable.
+    brew_pkg!("ripgrep", bin = "rg"),
+    brew_pkg!("fd"),
+    brew_pkg!("bat"),
+    brew_pkg!("eza"),
+    brew_pkg!("zoxide"),
+    brew_pkg!("fzf"),
+    brew_pkg!("jq"),
+    brew_pkg!("yq"),
+    brew_pkg!("sd"),
+    brew_pkg!("git-delta", bin = "delta"),
+    brew_pkg!("hyperfine"),
+    brew_pkg!("tealdeer", bin = "tldr"),
+    brew_pkg!("vim"),
+    brew_pkg!("git"),
+    brew_pkg!("gh"),
+    brew_pkg!("chezmoi"),
+    brew_pkg!("just"),
+    brew_pkg!("mise"),
+    brew_pkg!("direnv"),
+    brew_pkg!("watchexec"),
+    brew_pkg!("tokei"),
+    brew_pkg!("lazygit"),
+    brew_pkg!("difftastic", bin = "difft"),
+    brew_pkg!("actionlint"),
+    brew_pkg!("htop"),
+    brew_pkg!("btop"),
+    brew_pkg!("wget"),
+    brew_pkg!("curl"),
+    brew_pkg!("make"),
+    brew_pkg!("man-db", bin = "man"),
+    brew_pkg!("whois"),
+    brew_pkg!("nmap"),
+    brew_pkg!("typos", formula = "typos-cli", bin = "typos"),
+    brew_pkg!("yamllint"),
+    // GNU inetutils supplies telnet; the standalone formula has no bottle.
+    brew_pkg!("telnet", formula = "inetutils", bin = "telnet"),
+    // No maintained user-space provider (see the module notes). Distributions
+    // ship a current one, so this resolves through the binary check on any
+    // ordinary system and falls back to dnf where that is usable.
     Pkg {
         name: "netcat",
         binary: Some("nc"),
@@ -208,21 +160,10 @@ static CORE: &[Pkg] = &[
             Platforms::NOT_ATOMIC,
         )],
     },
-    Pkg {
-        name: "tmux",
-        binary: Some("tmux"),
-        providers: &[Provider::new(ManagerId::Brew, "tmux")],
-    },
-    // Third-party tap; nt runs `brew tap` before installing.
-    Pkg {
-        name: "devcontainer",
-        binary: Some("devcontainer"),
-        providers: &[Provider::new(ManagerId::Brew, "devcontainer")],
-    },
-    // No Homebrew formula: toolbox is an OS-level container tool, shipped by
-    // the distribution. Atomic images include it, so the binary check settles
-    // it there; elsewhere dnf can supply it. This is the one catalog package
-    // with no user-space provider.
+    brew_pkg!("tmux"),
+    brew_pkg!("devcontainer"),
+    // No Homebrew formula: an OS-level container tool. Atomic images ship it,
+    // so the binary check settles it there; elsewhere dnf can supply it.
     Pkg {
         name: "toolbox",
         binary: Some("toolbox"),
@@ -241,303 +182,178 @@ static CORE: &[Pkg] = &[
 
 // --- shell ------------------------------------------------------------------
 
-static SHELL: &[Pkg] = &[
+static SHELL: &[Pkg] = &[brew_pkg!("shellcheck"), brew_pkg!("shfmt")];
+
+// --- prompt -----------------------------------------------------------------
+// Exactly one of these is installed: the one `[shell] prompt` names.
+
+static PROMPT: &[Pkg] = &[
+    brew_pkg!("starship"),
+    brew_pkg!("oh-my-posh"),
+    // A bash library rather than a binary, so only the tap listing can
+    // satisfy it.
     Pkg {
-        name: "shellcheck",
-        binary: Some("shellcheck"),
-        providers: &[Provider::new(ManagerId::Brew, "shellcheck")],
-    },
-    Pkg {
-        name: "shfmt",
-        binary: Some("shfmt"),
-        providers: &[Provider::new(ManagerId::Brew, "shfmt")],
+        name: "powerbash",
+        binary: None,
+        providers: &[Provider::tapped("powerbash", "powerbash/powerbash")],
     },
 ];
 
 // --- security ---------------------------------------------------------------
 
 static SECURITY: &[Pkg] = &[
-    Pkg {
-        name: "trivy",
-        binary: Some("trivy"),
-        providers: &[Provider::new(ManagerId::Brew, "trivy")],
-    },
-    Pkg {
-        name: "gitleaks",
-        binary: Some("gitleaks"),
-        providers: &[Provider::new(ManagerId::Brew, "gitleaks")],
-    },
-    Pkg {
-        name: "osv-scanner",
-        binary: Some("osv-scanner"),
-        providers: &[Provider::new(ManagerId::Brew, "osv-scanner")],
-    },
-    Pkg {
-        name: "semgrep",
-        binary: Some("semgrep"),
-        providers: &[Provider::new(ManagerId::Brew, "semgrep")],
-    },
-    Pkg {
-        name: "syft",
-        binary: Some("syft"),
-        providers: &[Provider::new(ManagerId::Brew, "syft")],
-    },
-    Pkg {
-        name: "grype",
-        binary: Some("grype"),
-        providers: &[Provider::new(ManagerId::Brew, "grype")],
-    },
-    Pkg {
-        name: "hadolint",
-        binary: Some("hadolint"),
-        providers: &[Provider::new(ManagerId::Brew, "hadolint")],
-    },
+    brew_pkg!("trivy"),
+    brew_pkg!("gitleaks"),
+    brew_pkg!("osv-scanner"),
+    brew_pkg!("semgrep"),
+    brew_pkg!("syft"),
+    brew_pkg!("grype"),
+    brew_pkg!("hadolint"),
 ];
 
 // --- ai ---------------------------------------------------------------------
 
 static AI: &[Pkg] = &[
-    // Installed here by the vendor script into ~/.local/bin, where it
-    // self-updates. The binary check keeps npm from adding a second, staler copy.
-    Pkg {
-        name: "claude-code",
-        binary: Some("claude"),
-        providers: &[Provider::new(ManagerId::Npm, "@anthropic-ai/claude-code")],
-    },
+    // The vendor script installs into ~/.local/bin, where it self-updates.
+    // The binary check keeps npm from adding a second, staler copy.
+    npm_pkg!(
+        "claude-code",
+        pkg = "@anthropic-ai/claude-code",
+        bin = "claude"
+    ),
     // The cask, not the formula: `copilot` the formula is AWS's ECS tool.
-    Pkg {
-        name: "copilot-cli",
-        binary: Some("copilot"),
-        providers: &[Provider::new(ManagerId::BrewCask, "copilot-cli")],
-    },
-    Pkg {
-        name: "codex",
-        binary: Some("codex"),
-        providers: &[Provider::new(ManagerId::Npm, "@openai/codex")],
-    },
-    // No npm package exists; the one named `antigravity` on npm is an
-    // unrelated placeholder and must not be used. The cask installs its
-    // binary as `agy`, not `antigravity`.
-    Pkg {
-        name: "antigravity-cli",
-        binary: Some("agy"),
-        providers: &[Provider::new(ManagerId::BrewCask, "antigravity-cli")],
-    },
+    cask_pkg!("copilot-cli", bin = "copilot"),
+    npm_pkg!("codex", pkg = "@openai/codex", bin = "codex"),
+    // The cask installs its binary as `agy`, not `antigravity`.
+    cask_pkg!("antigravity-cli", bin = "agy"),
 ];
 
 // --- languages --------------------------------------------------------------
+// Each bundle is the toolchain plus its supporting tools, so a machine has
+// every language ready without a second step.
 
 static GO: &[Pkg] = &[
-    Pkg {
-        name: "golangci-lint",
-        binary: Some("golangci-lint"),
-        providers: &[Provider::new(ManagerId::Brew, "golangci-lint")],
-    },
-    Pkg {
-        name: "govulncheck",
-        binary: Some("govulncheck"),
-        providers: &[Provider::new(ManagerId::Brew, "govulncheck")],
-    },
-    Pkg {
-        name: "gopls",
-        binary: Some("gopls"),
-        providers: &[Provider::new(ManagerId::Brew, "gopls")],
-    },
-    Pkg {
-        name: "goreleaser",
-        binary: Some("goreleaser"),
-        providers: &[Provider::new(ManagerId::Brew, "goreleaser")],
-    },
+    mise_pkg!("go", "go@latest"),
+    brew_pkg!("golangci-lint"),
+    brew_pkg!("govulncheck"),
+    brew_pkg!("gopls"),
+    brew_pkg!("goreleaser"),
+    brew_pkg!("delve", bin = "dlv"),
 ];
 
 static RUST: &[Pkg] = &[
-    Pkg {
-        name: "cargo-audit",
-        binary: Some("cargo-audit"),
-        providers: &[Provider::new(ManagerId::Brew, "cargo-audit")],
-    },
-    Pkg {
-        name: "cargo-deny",
-        binary: Some("cargo-deny"),
-        providers: &[Provider::new(ManagerId::Brew, "cargo-deny")],
-    },
-    Pkg {
-        name: "cargo-nextest",
-        binary: Some("cargo-nextest"),
-        providers: &[Provider::new(ManagerId::Brew, "cargo-nextest")],
-    },
-    Pkg {
-        name: "taplo",
-        binary: Some("taplo"),
-        providers: &[Provider::new(ManagerId::Brew, "taplo")],
-    },
-    Pkg {
-        name: "rust-analyzer",
-        binary: Some("rust-analyzer"),
-        providers: &[Provider::new(ManagerId::Brew, "rust-analyzer")],
-    },
+    mise_pkg!("rust", "rust@stable"),
+    brew_pkg!("cargo-audit"),
+    brew_pkg!("cargo-deny"),
+    brew_pkg!("cargo-nextest"),
+    brew_pkg!("cargo-binstall"),
+    brew_pkg!("cargo-llvm-cov"),
+    brew_pkg!("cargo-outdated"),
+    brew_pkg!("bacon"),
+    brew_pkg!("sccache"),
+    brew_pkg!("taplo"),
+    brew_pkg!("rust-analyzer"),
 ];
 
 static PYTHON: &[Pkg] = &[
-    Pkg {
-        name: "ruff",
-        binary: Some("ruff"),
-        providers: &[Provider::new(ManagerId::Brew, "ruff")],
-    },
-    Pkg {
-        name: "uv",
-        binary: Some("uv"),
-        providers: &[Provider::new(ManagerId::Brew, "uv")],
-    },
-    Pkg {
-        name: "mypy",
-        binary: Some("mypy"),
-        providers: &[Provider::new(ManagerId::Brew, "mypy")],
-    },
-    Pkg {
-        name: "pip-audit",
-        binary: Some("pip-audit"),
-        providers: &[Provider::new(ManagerId::Brew, "pip-audit")],
-    },
-    Pkg {
-        name: "pipenv",
-        binary: Some("pipenv"),
-        providers: &[Provider::new(ManagerId::Brew, "pipenv")],
-    },
+    mise_pkg!("python", "python@3.13"),
+    brew_pkg!("uv"),
+    brew_pkg!("ruff"),
+    brew_pkg!("mypy"),
+    brew_pkg!("pip-audit"),
+    npm_pkg!("pyright", pkg = "pyright", bin = "pyright"),
 ];
 
 static NODE: &[Pkg] = &[
+    mise_pkg!("node", "node@lts"),
+    mise_pkg!("bun", "bun@latest"),
+    mise_pkg!("deno", "deno@latest"),
+    brew_pkg!("pnpm"),
+    brew_pkg!("biome"),
+    brew_pkg!("oxlint"),
+    brew_pkg!("typescript", bin = "tsc"),
+    brew_pkg!("prettier"),
+];
+
+static JAVA: &[Pkg] = &[
+    mise_pkg!("java", "java@corretto-21"),
+    mise_pkg!("maven", "maven@latest"),
+    mise_pkg!("gradle", "gradle@latest"),
+    mise_pkg!("kotlin", "kotlin@latest"),
+    mise_pkg!("ktlint", "ktlint@latest"),
+];
+
+static DOTNET: &[Pkg] = &[
+    // The current LTS. `latest` would select a preview.
+    mise_pkg!("dotnet", "dotnet@10"),
+];
+
+static RUBY: &[Pkg] = &[mise_pkg!("ruby", "ruby@latest")];
+
+static ZIG: &[Pkg] = &[mise_pkg!("zig", "zig@latest"), brew_pkg!("zls")];
+
+static PHP: &[Pkg] = &[
+    // Bottled; mise's PHP builds from source.
+    brew_pkg!("php"),
+    brew_pkg!("composer"),
+];
+
+static LUA: &[Pkg] = &[
+    brew_pkg!("lua"),
+    brew_pkg!("luarocks"),
+    brew_pkg!("stylua"),
+    brew_pkg!("lua-language-server"),
+];
+
+static PERL: &[Pkg] = &[brew_pkg!("perl")];
+
+static ELIXIR: &[Pkg] = &[
+    // Both bottled; mise's Erlang compiles OTP from source.
+    brew_pkg!("erlang", bin = "erl"),
+    brew_pkg!("elixir"),
+];
+
+static POWERSHELL: &[Pkg] = &[brew_pkg!("powershell", bin = "pwsh")];
+
+static ANDROID: &[Pkg] = &[
+    // Google's unified `android` command-line tool (dl.google.com/android/cli):
+    // `android init`, `android sdk`, `android emulator`, `android create`.
+    // It installs SDK components itself, after the licences are accepted -
+    // a deliberate act rather than an automated one.
+    mise_pkg!("android-cli", "android-cli@latest"),
+    brew_pkg!("scrcpy"),
     Pkg {
-        name: "biome",
-        binary: Some("biome"),
-        providers: &[Provider::new(ManagerId::Brew, "biome")],
-    },
-    Pkg {
-        name: "oxlint",
-        binary: Some("oxlint"),
-        providers: &[Provider::new(ManagerId::Brew, "oxlint")],
-    },
-    Pkg {
-        name: "typescript",
-        binary: Some("tsc"),
-        providers: &[Provider::new(ManagerId::Brew, "typescript")],
+        name: "android-studio",
+        binary: None,
+        providers: &[Provider::gated(
+            ManagerId::Flatpak,
+            "com.google.AndroidStudio",
+            Platforms::GRAPHICAL,
+        )],
     },
 ];
 
+// --- web, data, aws ---------------------------------------------------------
+
 static WEB: &[Pkg] = &[
-    Pkg {
-        name: "prettier",
-        binary: Some("prettier"),
-        providers: &[Provider::new(ManagerId::Brew, "prettier")],
-    },
-    Pkg {
-        name: "stylelint",
-        binary: Some("stylelint"),
-        providers: &[Provider::new(ManagerId::Brew, "stylelint")],
-    },
-    Pkg {
-        name: "htmlq",
-        binary: Some("htmlq"),
-        providers: &[Provider::new(ManagerId::Brew, "htmlq")],
-    },
-    Pkg {
-        name: "pandoc",
-        binary: Some("pandoc"),
-        providers: &[Provider::new(ManagerId::Brew, "pandoc")],
-    },
-    Pkg {
-        name: "pa11y",
-        binary: Some("pa11y"),
-        providers: &[Provider::new(ManagerId::Npm, "pa11y")],
-    },
+    brew_pkg!("stylelint"),
+    brew_pkg!("htmlq"),
+    brew_pkg!("pandoc"),
+    npm_pkg!("pa11y", pkg = "pa11y", bin = "pa11y"),
 ];
 
 static DATA: &[Pkg] = &[
-    Pkg {
-        name: "miller",
-        binary: Some("mlr"),
-        providers: &[Provider::new(ManagerId::Brew, "miller")],
-    },
-    Pkg {
-        name: "duckdb",
-        binary: Some("duckdb"),
-        providers: &[Provider::new(ManagerId::Brew, "duckdb")],
-    },
-    Pkg {
-        name: "qsv",
-        binary: Some("qsv"),
-        providers: &[Provider::new(ManagerId::Brew, "qsv")],
-    },
-    Pkg {
-        name: "sqlite",
-        binary: Some("sqlite3"),
-        providers: &[Provider::new(ManagerId::Brew, "sqlite")],
-    },
-    Pkg {
-        name: "sqlite-utils",
-        binary: Some("sqlite-utils"),
-        providers: &[Provider::new(ManagerId::Brew, "sqlite-utils")],
-    },
+    brew_pkg!("miller", bin = "mlr"),
+    brew_pkg!("duckdb"),
+    brew_pkg!("qsv"),
+    brew_pkg!("sqlite", bin = "sqlite3"),
+    brew_pkg!("sqlite-utils"),
 ];
-
-// --- runtimes ---------------------------------------------------------------
-// Off by default: mise manages runtimes on machines that use it, and two
-// things managing the same runtime means PATH order decides which wins.
-
-static GO_RUNTIME: &[Pkg] = &[Pkg {
-    name: "go",
-    binary: Some("go"),
-    providers: &[Provider::new(ManagerId::Brew, "go")],
-}];
-
-static RUST_RUNTIME: &[Pkg] = &[Pkg {
-    name: "rustup",
-    binary: Some("rustup"),
-    providers: &[Provider::new(ManagerId::Brew, "rustup")],
-}];
-
-static PYTHON_RUNTIME: &[Pkg] = &[Pkg {
-    name: "python@3.14",
-    binary: Some("python3.14"),
-    providers: &[Provider::new(ManagerId::Brew, "python@3.14")],
-}];
-
-static NODE_RUNTIME: &[Pkg] = &[
-    Pkg {
-        name: "node",
-        binary: Some("node"),
-        providers: &[Provider::new(ManagerId::Brew, "node")],
-    },
-    Pkg {
-        name: "bun",
-        binary: Some("bun"),
-        providers: &[Provider::new(ManagerId::Brew, "bun")],
-    },
-    Pkg {
-        name: "pnpm",
-        binary: Some("pnpm"),
-        providers: &[Provider::new(ManagerId::Brew, "pnpm")],
-    },
-];
-
-// --- aws --------------------------------------------------------------------
 
 static AWS: &[Pkg] = &[
-    Pkg {
-        name: "awscli",
-        binary: Some("aws"),
-        providers: &[Provider::new(ManagerId::Brew, "awscli")],
-    },
-    Pkg {
-        name: "aws-sam-cli",
-        binary: Some("sam"),
-        providers: &[Provider::new(ManagerId::Brew, "aws-sam-cli")],
-    },
-    Pkg {
-        name: "cfn-lint",
-        binary: Some("cfn-lint"),
-        providers: &[Provider::new(ManagerId::Brew, "cfn-lint")],
-    },
+    brew_pkg!("awscli", bin = "aws"),
+    brew_pkg!("aws-sam-cli", bin = "sam"),
+    brew_pkg!("cfn-lint"),
 ];
 
 // --- desktop ----------------------------------------------------------------
@@ -545,18 +361,9 @@ static AWS: &[Pkg] = &[
 static DESKTOP: &[Pkg] = &[
     // Flatpak applications expose no binary on PATH, so only the flatpak
     // listing can satisfy them.
-    Pkg {
-        name: "remmina",
-        binary: None,
-        providers: &[Provider::new(ManagerId::Flatpak, "org.remmina.Remmina")],
-    },
-    Pkg {
-        name: "spotify",
-        binary: None,
-        providers: &[Provider::new(ManagerId::Flatpak, "com.spotify.Client")],
-    },
-    // Homebrew first, dnf only where Homebrew cannot serve. This is the
-    // ordinary shape of a provider list, and why the order is per-package.
+    flatpak_pkg!("remmina", "org.remmina.Remmina"),
+    flatpak_pkg!("spotify", "com.spotify.Client"),
+    // Homebrew first, dnf only where Homebrew cannot serve.
     Pkg {
         name: "xdotool",
         binary: Some("xdotool"),
@@ -571,203 +378,92 @@ static DESKTOP: &[Pkg] = &[
 // Casks with no executable; only the cask listing can satisfy them.
 
 static FONTS: &[Pkg] = &[
-    Pkg {
-        name: "font-0xproto-nerd-font",
-        binary: None,
-        providers: &[Provider::new(ManagerId::BrewCask, "font-0xproto-nerd-font")],
-    },
-    Pkg {
-        name: "font-blex-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-blex-mono-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-caskaydia-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-caskaydia-mono-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-comic-shanns-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-comic-shanns-mono-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-droid-sans-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-droid-sans-mono-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-fira-code-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-fira-code-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-go-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(ManagerId::BrewCask, "font-go-mono-nerd-font")],
-    },
-    Pkg {
-        name: "font-jetbrains-mono-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-jetbrains-mono-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-sauce-code-pro-nerd-font",
-        binary: None,
-        providers: &[Provider::new(
-            ManagerId::BrewCask,
-            "font-sauce-code-pro-nerd-font",
-        )],
-    },
-    Pkg {
-        name: "font-source-code-pro",
-        binary: None,
-        providers: &[Provider::new(ManagerId::BrewCask, "font-source-code-pro")],
-    },
-    Pkg {
-        name: "font-ubuntu-nerd-font",
-        binary: None,
-        providers: &[Provider::new(ManagerId::BrewCask, "font-ubuntu-nerd-font")],
-    },
+    cask_pkg!("font-0xproto-nerd-font"),
+    cask_pkg!("font-blex-mono-nerd-font"),
+    cask_pkg!("font-caskaydia-mono-nerd-font"),
+    cask_pkg!("font-comic-shanns-mono-nerd-font"),
+    cask_pkg!("font-droid-sans-mono-nerd-font"),
+    cask_pkg!("font-fira-code-nerd-font"),
+    cask_pkg!("font-go-mono-nerd-font"),
+    cask_pkg!("font-jetbrains-mono-nerd-font"),
+    cask_pkg!("font-sauce-code-pro-nerd-font"),
+    cask_pkg!("font-source-code-pro"),
+    cask_pkg!("font-ubuntu-nerd-font"),
 ];
 
-/// Every bundle `nt` knows about.
+/// A bundle on everywhere.
+const fn bundle(name: &'static str, description: &'static str, packages: &'static [Pkg]) -> Bundle {
+    Bundle {
+        name,
+        description,
+        platforms: Platforms::ALL,
+        selector: Selector::All,
+        packages,
+    }
+}
+
+/// Every bundle `nt` knows about, in the order they are reported.
 pub static BUNDLES: &[Bundle] = &[
+    bundle("core", "Terminal and git essentials", CORE),
+    bundle("shell", "Shell script linting and formatting", SHELL),
     Bundle {
-        name: "core",
-        description: "Terminal and git essentials",
-        default_enabled: true,
+        name: "prompt",
+        description: "The shell prompt named by [shell] prompt",
         platforms: Platforms::ALL,
-        packages: CORE,
+        selector: Selector::Prompt,
+        packages: PROMPT,
     },
-    Bundle {
-        name: "shell",
-        description: "Shell script linting and formatting",
-        default_enabled: true,
-        platforms: Platforms::ALL,
-        packages: SHELL,
-    },
-    Bundle {
-        name: "security",
-        description: "Vulnerability, secret and misconfiguration scanners",
-        default_enabled: true,
-        platforms: Platforms::ALL,
-        packages: SECURITY,
-    },
-    Bundle {
-        name: "ai",
-        description: "AI coding agents and assistants",
-        default_enabled: true,
-        platforms: Platforms::ALL,
-        packages: AI,
-    },
-    Bundle {
-        name: "go",
-        description: "Go linting, vulnerability scanning and release tooling",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: GO,
-    },
-    Bundle {
-        name: "rust",
-        description: "Rust auditing, testing and language tooling",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: RUST,
-    },
-    Bundle {
-        name: "python",
-        description: "Python linting, typing, auditing and environments",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: PYTHON,
-    },
-    Bundle {
-        name: "node",
-        description: "JavaScript and TypeScript linting and formatting",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: NODE,
-    },
-    Bundle {
-        name: "web",
-        description: "HTML, CSS and accessibility tooling",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: WEB,
-    },
-    Bundle {
-        name: "data",
-        description: "SQLite, CSV and columnar data tooling",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: DATA,
-    },
-    Bundle {
-        name: "go-runtime",
-        description: "The Go toolchain itself",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: GO_RUNTIME,
-    },
-    Bundle {
-        name: "rust-runtime",
-        description: "The Rust toolchain installer",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: RUST_RUNTIME,
-    },
-    Bundle {
-        name: "python-runtime",
-        description: "The Python interpreter itself",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: PYTHON_RUNTIME,
-    },
-    Bundle {
-        name: "node-runtime",
-        description: "Node, Bun and pnpm",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: NODE_RUNTIME,
-    },
-    Bundle {
-        name: "aws",
-        description: "AWS CLI, serverless and CloudFormation tooling",
-        default_enabled: false,
-        platforms: Platforms::ALL,
-        packages: AWS,
-    },
+    bundle(
+        "security",
+        "Vulnerability, secret and misconfiguration scanners",
+        SECURITY,
+    ),
+    bundle("ai", "AI coding agents and assistants", AI),
+    bundle(
+        "go",
+        "Go toolchain, linting, vulnerability scanning and debugging",
+        GO,
+    ),
+    bundle(
+        "rust",
+        "Rust toolchain, auditing, coverage and language server",
+        RUST,
+    ),
+    bundle("python", "Python, uv, linting, typing and auditing", PYTHON),
+    bundle("node", "Node, Bun, Deno, pnpm and JavaScript tooling", NODE),
+    bundle(
+        "java",
+        "Amazon Corretto, Maven, Gradle, Kotlin and ktlint",
+        JAVA,
+    ),
+    bundle("dotnet", ".NET SDK", DOTNET),
+    bundle("ruby", "Ruby", RUBY),
+    bundle("zig", "Zig and its language server", ZIG),
+    bundle("php", "PHP and Composer", PHP),
+    bundle("lua", "Lua, LuaRocks, StyLua and its language server", LUA),
+    bundle("perl", "Perl", PERL),
+    bundle("elixir", "Erlang and Elixir", ELIXIR),
+    bundle("powershell", "PowerShell", POWERSHELL),
+    bundle(
+        "android",
+        "Android command-line tools, scrcpy and Android Studio",
+        ANDROID,
+    ),
+    bundle("web", "HTML, CSS and accessibility tooling", WEB),
+    bundle("data", "SQLite, CSV and columnar data tooling", DATA),
+    bundle("aws", "AWS CLI, serverless and CloudFormation tooling", AWS),
     Bundle {
         name: "desktop",
         description: "Graphical applications and desktop helpers",
-        default_enabled: false,
-        platforms: Platforms::NOT_WSL,
+        platforms: Platforms::GRAPHICAL,
+        selector: Selector::All,
         packages: DESKTOP,
     },
     Bundle {
         name: "fonts",
         description: "Nerd Fonts and programming typefaces",
-        default_enabled: false,
-        platforms: Platforms::NOT_WSL,
+        platforms: Platforms::GRAPHICAL,
+        selector: Selector::All,
         packages: FONTS,
     },
 ];
@@ -777,8 +473,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    // These guard the catalog as data. They are not driven by new behaviour;
-    // they exist so a bad entry fails the build rather than a user's machine.
+    // These guard the catalog as data. They exist so a bad entry fails the
+    // build rather than a user's machine.
 
     #[test]
     fn bundle_names_are_unique() {
@@ -789,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_names_are_valid_cli_flags() {
+    fn bundle_names_are_valid_cli_values() {
         for b in BUNDLES {
             assert!(
                 !b.name.is_empty()
@@ -798,7 +494,7 @@ mod tests {
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
                     && !b.name.starts_with('-')
                     && !b.name.ends_with('-'),
-                "bundle name is not a usable flag: {:?}",
+                "bundle name is not usable on the command line: {:?}",
                 b.name
             );
         }
@@ -820,8 +516,6 @@ mod tests {
 
     #[test]
     fn package_names_are_unique_across_the_whole_catalog() {
-        // Duplication across bundles would mean an install planned twice and
-        // an ambiguous `[extra]` reference.
         let mut seen = HashSet::new();
         for b in BUNDLES {
             for p in b.packages {
@@ -830,6 +524,27 @@ mod tests {
                     "package {} appears more than once in the catalog",
                     p.name
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_ids_are_unique_per_manager() {
+        // Two packages naming the same formula would be installed once and
+        // reported twice.
+        let mut seen = HashSet::new();
+        for b in BUNDLES {
+            for p in b.packages {
+                for pr in p.providers {
+                    assert!(
+                        seen.insert((pr.manager, pr.id)),
+                        "{}/{} repeats provider {}:{}",
+                        b.name,
+                        p.name,
+                        pr.manager,
+                        pr.id
+                    );
+                }
             }
         }
     }
@@ -861,13 +576,17 @@ mod tests {
     }
 
     #[test]
-    fn packages_without_a_binary_are_only_fonts_and_flatpak_apps() {
-        // Anything else omitting `binary` is a mistake: it would be reinstalled
-        // whenever its manager happens not to know about it.
+    fn packages_without_a_binary_are_only_those_whose_listing_is_authoritative() {
+        // Fonts and flatpak apps have no executable; mise toolchains are
+        // version-managed, so a same-named binary on PATH proves nothing;
+        // powerbash is a bash library. Anything else omitting `binary` would
+        // be reinstalled whenever its manager happened not to report it.
         for b in BUNDLES {
             for p in b.packages.iter().filter(|p| p.binary.is_none()) {
                 let ok = p.providers.iter().all(|pr| {
-                    matches!(pr.manager, ManagerId::Flatpak) || p.name.starts_with("font-")
+                    matches!(pr.manager, ManagerId::Flatpak | ManagerId::Mise)
+                        || p.name.starts_with("font-")
+                        || p.name == "powerbash"
                 });
                 assert!(ok, "{}/{} declares no binary", b.name, p.name);
             }
@@ -875,8 +594,28 @@ mod tests {
     }
 
     #[test]
+    fn mise_specs_are_tool_at_version() {
+        for b in BUNDLES {
+            for p in b.packages {
+                for pr in p
+                    .providers
+                    .iter()
+                    .filter(|pr| pr.manager == ManagerId::Mise)
+                {
+                    let (tool, version) = pr.id.split_once('@').unwrap_or_else(|| {
+                        panic!(
+                            "{}/{}: mise id {:?} is not tool@version",
+                            b.name, p.name, pr.id
+                        )
+                    });
+                    assert!(!tool.is_empty() && !version.is_empty(), "{}", pr.id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_aws_formula_is_not_confused_with_the_github_copilot_cask() {
-        // `copilot` the formula is AWS's ECS tool and its upstream is archived.
         for b in BUNDLES {
             for p in b.packages {
                 for pr in p.providers {
@@ -887,5 +626,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_prompt_bundle_offers_every_selectable_prompt() {
+        let prompt = BUNDLES.iter().find(|b| b.name == "prompt").unwrap();
+        let names: Vec<&str> = prompt.packages.iter().map(|p| p.name).collect();
+
+        assert_eq!(prompt.selector, Selector::Prompt);
+        for expected in crate::config::PROMPTS {
+            assert!(
+                names.contains(expected),
+                "prompt {expected} is not in the bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_prompt_bundle_uses_the_prompt_selector() {
+        for b in BUNDLES {
+            assert_eq!(
+                b.selector == Selector::Prompt,
+                b.name == "prompt",
+                "{}",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn graphical_bundles_are_the_ones_that_draw() {
+        for b in BUNDLES {
+            let graphical = b.platforms.needs_graphical;
+            assert_eq!(
+                graphical,
+                matches!(b.name, "desktop" | "fonts"),
+                "{} graphical={graphical}",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_requested_language_is_present() {
+        // The brief: every language and its toolset, plus Corretto, Android
+        // and PowerShell. A rename here should be deliberate.
+        let names: HashSet<&str> = BUNDLES.iter().map(|b| b.name).collect();
+        for expected in [
+            "go",
+            "rust",
+            "python",
+            "node",
+            "java",
+            "dotnet",
+            "ruby",
+            "zig",
+            "php",
+            "lua",
+            "perl",
+            "elixir",
+            "powershell",
+            "android",
+        ] {
+            assert!(names.contains(expected), "missing bundle {expected}");
+        }
+        let java = BUNDLES.iter().find(|b| b.name == "java").unwrap();
+        assert!(
+            java.packages
+                .iter()
+                .any(|p| p.providers[0].id.starts_with("java@corretto")),
+            "Java must be Amazon Corretto"
+        );
     }
 }

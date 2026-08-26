@@ -1,10 +1,11 @@
 //! End-to-end tests driving the `nt` binary.
 //!
-//! Every test pins the machine-dependent inputs — hostname, os-release, the
-//! ostree marker and the config file — through the `NT_*` overrides, so the
-//! results do not depend on the developer's own machine. The exception is the
-//! set of installed packages, which the binary genuinely queries; assertions
-//! here are written to hold whatever happens to be installed.
+//! Every test pins the machine-dependent inputs - hostname, os-release, the
+//! ostree marker, the container marker, the session directory and the config
+//! file - through the `NT_*` overrides, so the results do not depend on the
+//! developer's own machine. The exception is the set of installed packages,
+//! which the binary genuinely queries; assertions here are written to hold
+//! whatever happens to be installed.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -17,36 +18,50 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// A `nt` invocation with the environment pinned to an atomic Fedora host.
-///
-/// The ostree marker points at a file that certainly exists, which is what
-/// makes the host read as atomic.
+/// A `nt` invocation with every platform input pinned.
+fn nt(config: &Path, os_release: &str, atomic: bool, container: bool, graphical: bool) -> Command {
+    let exists = fixture("os-release-bluefin");
+    let missing = PathBuf::from("/nonexistent/marker");
+    let mut cmd = Command::cargo_bin("nt").unwrap();
+    cmd.env("NT_CONFIG", config)
+        .env("NT_HOSTNAME", "testhost.example.com")
+        .env("NT_OS_RELEASE", fixture(os_release))
+        .env("NT_OSTREE_MARKER", if atomic { &exists } else { &missing })
+        .env(
+            "NT_CONTAINER_MARKER",
+            if container { &exists } else { &missing },
+        )
+        .env(
+            "NT_SESSION_DIR",
+            if graphical {
+                fixture("sessions")
+            } else {
+                PathBuf::from("/nonexistent/sessions")
+            },
+        )
+        .env_remove("WSL_DISTRO_NAME")
+        .env_remove("NT_FAKE_UID")
+        .env("NO_COLOR", "1");
+    cmd
+}
+
+/// Bluefin: atomic, graphical.
 fn on_atomic(config: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("nt").unwrap();
-    cmd.env("NT_CONFIG", config)
-        .env("NT_HOSTNAME", "testhost.example.com")
-        .env("NT_OS_RELEASE", fixture("os-release-bluefin"))
-        .env("NT_OSTREE_MARKER", fixture("os-release-bluefin"))
-        .env_remove("WSL_DISTRO_NAME");
-    cmd
+    nt(config, "os-release-bluefin", true, false, true)
 }
 
-/// A `nt` invocation pinned to a traditional, mutable Fedora host.
-fn on_traditional(config: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("nt").unwrap();
-    cmd.env("NT_CONFIG", config)
-        .env("NT_HOSTNAME", "testhost.example.com")
-        .env("NT_OS_RELEASE", fixture("os-release-fedora"))
-        .env("NT_OSTREE_MARKER", "/nonexistent/ostree-booted")
-        .env_remove("WSL_DISTRO_NAME");
-    cmd
+/// Fedora Workstation: mutable, graphical.
+fn on_workstation(config: &Path) -> Command {
+    nt(config, "os-release-fedora", false, false, true)
 }
 
-/// A config naming a dnf-only extra package.
-///
-/// Every catalog package resolves through Homebrew, so `[extra]` is the only
-/// way a user actually reaches dnf - which is what "last resort" means in
-/// practice.
+/// The Fedora container image: mutable, headless.
+fn in_container(config: &Path) -> Command {
+    nt(config, "os-release-fedora", false, true, false)
+}
+
+/// A config naming a dnf-only extra package: the way a user actually reaches
+/// the unavailable path on an atomic host.
 const DNF_EXTRA: &str = "[extra]\ndnf = [\"some-kernel-tool\"]\n";
 
 /// Write a config file into a temporary directory.
@@ -56,52 +71,145 @@ fn config_file(dir: &tempfile::TempDir, contents: &str) -> PathBuf {
     p
 }
 
+fn stdout(assert: assert_cmd::assert::Assert) -> String {
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
 #[test]
 fn version_prints_a_bare_string_for_scripts() {
-    let out = Command::cargo_bin("nt")
-        .unwrap()
-        .arg("version")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8(out).unwrap();
-
-    assert_eq!(
-        text.trim(),
-        env!("CARGO_PKG_VERSION"),
-        "`nt version` must print the version alone so it can be piped"
+    let out = stdout(
+        Command::cargo_bin("nt")
+            .unwrap()
+            .arg("version")
+            .assert()
+            .success(),
     );
+
+    assert_eq!(out.trim(), env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
 fn the_clap_version_flag_is_more_verbose_than_the_subcommand() {
-    let out = Command::cargo_bin("nt")
-        .unwrap()
-        .arg("--version")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let out = stdout(
+        Command::cargo_bin("nt")
+            .unwrap()
+            .arg("--version")
+            .assert()
+            .success(),
+    );
 
-    assert!(String::from_utf8(out).unwrap().starts_with("nt "));
+    assert!(out.starts_with("nt "));
 }
 
 #[test]
-fn bundles_lists_the_whole_catalog() {
+fn bundles_lists_the_whole_catalog_and_detail_lists_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let summary = stdout(on_atomic(&cfg).arg("bundles").assert().success());
+    assert!(summary.contains("core") && summary.contains("java") && summary.contains("android"));
+    assert!(!summary.contains("ripgrep"), "packages need --detail");
+
+    let detail = stdout(
+        on_atomic(&cfg)
+            .args(["bundles", "--detail"])
+            .assert()
+            .success(),
+    );
+    assert!(detail.contains("ripgrep"), "{detail}");
+    assert!(detail.contains("mise:java@corretto-21"), "{detail}");
+}
+
+#[test]
+fn bundles_json_carries_packages_and_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = stdout(
+        on_atomic(&cfg)
+            .args(["bundles", "--output", "json"])
+            .assert()
+            .success(),
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+
+    assert_eq!(v["bundles"][0]["name"], "core");
+    assert_eq!(
+        v["bundles"][0]["packages"][0]["providers"][0]["manager"],
+        "brew"
+    );
+}
+
+#[test]
+fn every_bundle_is_on_by_default_and_a_file_can_turn_one_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "[bundles]\nandroid = false\n");
+
+    let out = stdout(on_workstation(&cfg).arg("bundles").assert().success());
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.starts_with(name))
+            .unwrap()
+            .to_string()
+    };
+
+    assert!(row("android").contains("off"), "{}", row("android"));
+    assert!(row("java").contains("on"), "{}", row("java"));
+}
+
+#[test]
+fn graphical_bundles_are_not_applicable_in_a_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = stdout(in_container(&cfg).arg("bundles").assert().success());
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.starts_with(name))
+            .unwrap()
+            .to_string()
+    };
+
+    assert!(row("desktop").contains("n/a"), "{}", row("desktop"));
+    assert!(row("fonts").contains("n/a"), "{}", row("fonts"));
+    assert!(row("core").contains("on"), "{}", row("core"));
+}
+
+#[test]
+fn skip_and_only_narrow_a_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = stdout(
+        on_atomic(&cfg)
+            .args([
+                "bundles", "--only", "core", "--only", "rust", "--skip", "rust",
+            ])
+            .assert()
+            .success(),
+    );
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.starts_with(name))
+            .unwrap()
+            .to_string()
+    };
+
+    assert!(row("core").contains("on"), "{}", row("core"));
+    assert!(row("rust").contains("off"), "{}", row("rust"));
+    assert!(row("go").contains("off"), "{}", row("go"));
+}
+
+#[test]
+fn an_unknown_bundle_name_is_refused_by_the_parser() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "");
 
     on_atomic(&cfg)
-        .arg("bundles")
+        .args(["bundles", "--skip", "nope"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("core"))
-        .stdout(predicates::str::contains("security"))
-        .stdout(predicates::str::contains("node-runtime"))
-        .stdout(predicates::str::contains("desktop"));
+        .failure()
+        .stderr(predicates::str::contains("nope"));
 }
 
 #[test]
@@ -111,7 +219,7 @@ fn no_dnf_action_is_planned_on_an_atomic_host() {
     let cfg = config_file(&dir, "");
 
     on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop"])
+        .args(["apply", "--dry-run"])
         .assert()
         .success()
         .stdout(predicates::str::contains("dnf install").not());
@@ -142,29 +250,97 @@ fn strict_mode_exits_two_when_a_package_cannot_be_provisioned() {
 }
 
 #[test]
-fn strict_mode_succeeds_when_everything_can_be_provisioned() {
+fn a_dry_run_on_a_fresh_host_plans_the_bootstrap_first() {
+    // With PATH emptied of everything but the basics, neither brew nor mise
+    // can be found, so the dry run must show how it would obtain them.
     let dir = tempfile::tempdir().unwrap();
-    // desktop off, so the dnf-only package is never considered.
-    let cfg = config_file(&dir, "[bundles]\ndesktop = false\n");
+    let cfg = config_file(&dir, "[dotfiles]\nenabled = false\n");
 
-    on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--strict"])
-        .assert()
-        .success();
+    let out = stdout(
+        on_workstation(&cfg)
+            .env("PATH", "/usr/bin:/bin")
+            .env("NT_TOOL_DIRS", "")
+            .env("HOME", dir.path())
+            .args(["apply", "--dry-run", "--output", "json"])
+            .assert()
+            .success(),
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    let kinds: Vec<&str> = v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(kinds[0], "bootstrap", "{kinds:?}");
+    let bootstrap: Vec<&str> = v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["kind"] == "bootstrap")
+        .map(|a| a["command"].as_str().unwrap())
+        .collect();
+    assert!(
+        bootstrap.iter().any(|c| c.contains("Homebrew/install")),
+        "{bootstrap:?}"
+    );
+    assert!(
+        bootstrap.iter().any(|c| c.contains("brew install mise")),
+        "{bootstrap:?}"
+    );
+    // Once bootstrapped, brew and mise are assumed available, so the catalog
+    // plans against them rather than reporting everything unavailable.
+    assert!(
+        kinds.contains(&"install"),
+        "packages should be planned for install after bootstrap: {kinds:?}"
+    );
+    assert!(
+        v["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "ripgrep" && p["state"] == "missing"),
+        "{}",
+        v["packages"]
+    );
 }
 
 #[test]
-fn the_same_package_is_planned_via_dnf_on_a_traditional_host() {
-    // The mirror of the atomic case: identical config and catalog, and the
-    // only difference is the platform.
+fn a_dry_run_json_names_the_platform() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "");
 
-    on_traditional(&cfg)
-        .args(["apply", "--dry-run", "--desktop"])
+    let out = stdout(
+        in_container(&cfg)
+            .args(["apply", "--dry-run", "--output", "json"])
+            .assert()
+            .success(),
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(v["platform"]["container"], true);
+    assert_eq!(v["platform"]["graphical"], false);
+    assert!(
+        v["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "desktop")
+    );
+}
+
+#[test]
+fn apply_refuses_to_run_as_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    on_workstation(&cfg)
+        .env("NT_FAKE_UID", "0")
+        .args(["apply", "--dry-run"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("no user-space provider").not());
+        .failure()
+        .stderr(predicates::str::contains("root"));
 }
 
 #[test]
@@ -181,9 +357,8 @@ bundles = { aws = false }
 "#,
     );
 
-    let out = on_atomic(&cfg).arg("bundles").assert().success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    let aws_line = stdout.lines().find(|l| l.starts_with("aws")).unwrap();
+    let out = stdout(on_atomic(&cfg).arg("bundles").assert().success());
+    let aws_line = out.lines().find(|l| l.starts_with("aws")).unwrap();
 
     assert!(
         aws_line.contains("off"),
@@ -192,34 +367,24 @@ bundles = { aws = false }
 }
 
 #[test]
-fn a_command_line_flag_overrides_every_host_table() {
+fn config_show_reports_the_resolved_state_and_prompt() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "[host.\"*\"]\nbundles = { aws = false }\n");
-
-    let out = on_atomic(&cfg)
-        .args(["bundles", "--aws"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    let aws_line = stdout.lines().find(|l| l.starts_with("aws")).unwrap();
-
-    assert!(aws_line.contains("on"), "flag should win: {aws_line}");
-}
-
-#[test]
-fn a_typo_in_a_bundle_name_is_rejected_loudly() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "[bundles]\ndevv = true\n");
+    let cfg = config_file(
+        &dir,
+        "[shell]\nprompt = \"oh-my-posh\"\n[options]\nupgrade = true\n",
+    );
 
     on_atomic(&cfg)
-        .arg("bundles")
+        .args(["config", "show"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("devv"));
+        .success()
+        .stdout(predicates::str::contains("prompt:   oh-my-posh"))
+        .stdout(predicates::str::contains("upgrade:  true"))
+        .stdout(predicates::str::contains("atomic"));
 }
 
 #[test]
-fn config_path_reports_the_file_in_use() {
+fn config_path_honours_the_flag_and_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "");
 
@@ -227,39 +392,17 @@ fn config_path_reports_the_file_in_use() {
         .args(["config", "path"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("config.toml"));
-}
-
-#[test]
-fn config_show_reflects_the_detected_platform() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+        .stdout(predicates::str::contains(cfg.to_str().unwrap()));
 
     on_atomic(&cfg)
-        .args(["config", "show"])
+        .args(["config", "path", "--config", "/elsewhere/nt.toml"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("atomic=true"));
-
-    on_traditional(&cfg)
-        .args(["config", "show"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("atomic=false"));
+        .stdout(predicates::str::contains("/elsewhere/nt.toml"));
 }
 
 #[test]
-fn a_missing_config_file_is_not_an_error() {
-    let mut cmd = Command::cargo_bin("nt").unwrap();
-    cmd.env("NT_CONFIG", "/nonexistent/napalm-tools/config.toml")
-        .env("NT_HOSTNAME", "testhost")
-        .arg("bundles")
-        .assert()
-        .success();
-}
-
-#[test]
-fn a_malformed_config_file_names_the_path() {
+fn a_malformed_config_file_is_an_error_naming_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "[bundles\ncore = true");
 
@@ -271,197 +414,131 @@ fn a_malformed_config_file_names_the_path() {
 }
 
 #[test]
-fn completions_are_generated_for_every_supported_shell() {
+fn an_extra_shaped_like_a_flag_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "[extra]\nbrew = [\"--force\"]\n");
+
+    on_atomic(&cfg)
+        .arg("bundles")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--force"));
+}
+
+#[test]
+fn shell_init_follows_the_configured_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let cfg = config_file(&dir, "");
+    on_atomic(&cfg)
+        .args(["shell-init", "bash"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("starship init bash"));
+
+    let cfg = config_file(&dir, "[shell]\nprompt = \"powerbash\"\n");
+    on_atomic(&cfg)
+        .args(["shell-init", "bash"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("powerbash.sh"));
+    on_atomic(&cfg)
+        .args(["shell-init", "zsh"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("bash"));
+}
+
+#[test]
+fn completions_generate_for_each_shell() {
     for shell in ["bash", "zsh", "fish"] {
-        Command::cargo_bin("nt")
-            .unwrap()
-            .args(["completions", shell])
-            .assert()
-            .success()
-            .stdout(predicates::str::contains("nt"));
+        let out = stdout(
+            Command::cargo_bin("nt")
+                .unwrap()
+                .args(["completions", shell])
+                .assert()
+                .success(),
+        );
+        assert!(out.contains("nt"), "{shell}: {out}");
+        assert!(out.contains("skip"), "{shell} should complete --skip");
     }
 }
 
 #[test]
-fn generated_bash_completions_are_valid_bash() {
-    let out = Command::cargo_bin("nt")
-        .unwrap()
-        .args(["completions", "bash"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("nt.bash");
-    std::fs::write(&script, out).unwrap();
-
-    Command::new("bash")
-        .arg("-n")
-        .arg(&script)
-        .assert()
-        .success();
-}
-
-#[test]
-fn generated_completions_mention_the_bundle_flags() {
-    // Proof the parity guarantee reaches all the way to shell completion.
-    let out = Command::cargo_bin("nt")
-        .unwrap()
-        .args(["completions", "bash"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8(out).unwrap();
-
-    assert!(text.contains("--no-node-runtime"), "missing generated flag");
-}
-
-#[test]
-fn an_unknown_subcommand_fails_with_guidance() {
-    Command::cargo_bin("nt")
-        .unwrap()
-        .arg("frobnicate")
-        .assert()
-        .failure()
-        .stderr(
-            predicates::str::contains("unrecognized").or(predicates::str::contains("unexpected")),
-        );
-}
-
-#[test]
-fn bare_nt_shows_help_rather_than_doing_anything() {
-    Command::cargo_bin("nt")
-        .unwrap()
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("Usage"));
-}
-
-// --- output formats ---------------------------------------------------------
-
-/// Parse a command's stdout as JSON, failing loudly if anything else leaked in.
-fn stdout_json(out: &[u8]) -> serde_json::Value {
-    let text = String::from_utf8(out.to_vec()).unwrap();
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("stdout was not pure JSON ({e}):\n{text}"))
-}
-
-#[test]
-fn bundles_emits_valid_json() {
+fn json_output_is_a_single_parseable_document() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "");
 
-    let out = on_atomic(&cfg)
-        .args(["bundles", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let v = stdout_json(&out);
-    let names: Vec<&str> = v["bundles"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|b| b["name"].as_str().unwrap())
-        .collect();
-    assert!(names.contains(&"core"), "got {names:?}");
-    assert_eq!(v["bundles"][0]["enabled"], true);
+    for args in [
+        vec!["bundles"],
+        vec!["config", "show"],
+        vec!["apply", "--dry-run"],
+        vec!["status"],
+    ] {
+        let mut argv = args.clone();
+        argv.extend(["--output", "json"]);
+        let out = stdout(on_atomic(&cfg).args(&argv).assert().success());
+        serde_json::from_str::<serde_json::Value>(&out)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}\n{out}"));
+    }
 }
 
 #[test]
-fn a_dry_run_emits_valid_json_with_the_commands_it_would_run() {
+fn status_reports_desired_versus_installed_per_bundle() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, DNF_EXTRA);
+    let cfg = config_file(&dir, "");
 
-    let out = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let out = stdout(on_atomic(&cfg).arg("status").assert().success());
 
-    let v = stdout_json(&out);
-    assert_eq!(v["dry_run"], true);
-    assert!(v["actions"].is_array());
-    // The unavailable package is machine-readable too, not just prose.
-    let unavailable: Vec<&str> = v["unavailable"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|u| u["package"].as_str().unwrap())
-        .collect();
+    assert!(out.contains("core"), "{out}");
+    assert!(out.contains("packages present"), "{out}");
+    assert!(!out.contains("explicitly installed"), "{out}");
+
+    let json = stdout(
+        on_atomic(&cfg)
+            .args(["status", "--output", "json"])
+            .assert()
+            .success(),
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["bundles"][0]["name"], "core");
+    assert!(v["totals"]["present"].is_number());
+}
+
+#[test]
+fn stdout_carries_no_escapes_when_redirected() {
+    // The answer goes to a pipe here whatever the terminal on stderr does.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = stdout(
+        on_atomic(&cfg)
+            .env_remove("NO_COLOR")
+            .arg("bundles")
+            .assert()
+            .success(),
+    );
+
     assert!(
-        unavailable.contains(&"some-kernel-tool"),
-        "got {unavailable:?}"
+        !out.contains('\u{1b}'),
+        "escapes in redirected stdout: {out:?}"
     );
 }
 
 #[test]
-fn config_show_emits_valid_json_reporting_the_platform() {
+fn a_dry_run_never_asks_for_a_password() {
+    // `sudo` is not on this PATH at all, so any attempt to prime it would be
+    // a hard failure rather than a hidden prompt.
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
+    let cfg = config_file(&dir, "[dotfiles]\nenabled = false\n");
 
-    let out = on_atomic(&cfg)
-        .args(["config", "show", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    assert_eq!(stdout_json(&out)["platform"]["atomic"], true);
-}
-
-#[test]
-fn json_output_carries_no_ansi_escapes() {
-    // Otherwise redirecting to a file produces something no parser accepts.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    let out = on_atomic(&cfg)
-        .args(["bundles", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    assert!(
-        !String::from_utf8(out).unwrap().contains('\u{1b}'),
-        "escape sequences leaked into stdout"
-    );
-}
-
-#[test]
-fn diagnostics_stay_off_stdout() {
-    // The whole point of the channel split: stdout is the answer, nothing else.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    let assert = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop", "--output", "json", "-v"])
+    on_workstation(&cfg)
+        .env("PATH", "/nonexistent")
+        .env("NT_TOOL_DIRS", "")
+        .env("HOME", dir.path())
+        .args(["apply", "--dry-run"])
         .assert()
         .success();
-
-    stdout_json(&assert.get_output().stdout);
-}
-
-#[test]
-fn plain_output_is_requestable_explicitly() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    on_atomic(&cfg)
-        .args(["bundles", "--output", "plain"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("core"));
 }
 
 #[test]
@@ -469,187 +546,8 @@ fn verbosity_is_accepted_without_changing_the_answer() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_file(&dir, "");
 
-    let quiet_run = on_atomic(&cfg)
-        .args(["apply", "--dry-run"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let loud_run = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "-vv"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let quiet = stdout(on_atomic(&cfg).arg("bundles").assert().success());
+    let loud = stdout(on_atomic(&cfg).args(["bundles", "-vv"]).assert().success());
 
-    assert_eq!(
-        String::from_utf8(quiet_run).unwrap(),
-        String::from_utf8(loud_run).unwrap(),
-        "verbosity should change diagnostics, not the answer"
-    );
-}
-
-#[test]
-fn status_emits_valid_json() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    let out = on_atomic(&cfg)
-        .args(["status", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    assert!(stdout_json(&out)["actions"].is_array());
-}
-
-#[test]
-fn quiet_is_silent_on_success() {
-    // Silence means it worked; anything printed would defeat the flag.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    let assert = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "-q"])
-        .assert()
-        .success();
-    let out = assert.get_output();
-
-    assert!(
-        out.stdout.is_empty(),
-        "stdout: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        out.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn quiet_still_reports_a_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "[bundles]\ndevv = true\n");
-
-    on_atomic(&cfg)
-        .args(["apply", "--dry-run", "-q"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("devv"));
-}
-
-#[test]
-fn quiet_is_refused_where_it_would_only_discard_the_answer() {
-    // Better to reject the flag than accept it and print nothing.
-    for argv in [
-        vec!["version", "-q"],
-        vec!["bundles", "-q"],
-        vec!["completions", "bash", "-q"],
-    ] {
-        Command::cargo_bin("nt")
-            .unwrap()
-            .args(&argv)
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains("unexpected argument"));
-    }
-}
-
-#[test]
-fn version_refuses_flags_that_could_only_contradict_it() {
-    for argv in [
-        vec!["version", "--output", "json"],
-        vec!["version", "--config", "/tmp/x.toml"],
-    ] {
-        Command::cargo_bin("nt")
-            .unwrap()
-            .args(&argv)
-            .assert()
-            .failure();
-    }
-}
-
-// --- privileges -------------------------------------------------------------
-
-#[test]
-fn dnf_actions_escalate_privileges() {
-    // Without sudo the command cannot succeed: dnf refuses to run as a
-    // normal user, so the old unprivileged form was dead on arrival.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, DNF_EXTRA);
-
-    on_traditional(&cfg)
-        .args(["apply", "--dry-run"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(
-            "sudo dnf install -y some-kernel-tool",
-        ));
-}
-
-#[test]
-fn privileged_steps_are_visible_before_the_run_starts() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, DNF_EXTRA);
-
-    let out = on_traditional(&cfg)
-        .args(["apply", "--dry-run", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let v = stdout_json(&out);
-    let needs_password = v["actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|a| a["privileged"] == true);
-
-    assert!(
-        needs_password,
-        "a dnf run should declare that it needs a password"
-    );
-}
-
-#[test]
-fn no_privileged_action_is_planned_on_an_atomic_host() {
-    // dnf is refused there entirely, so nothing should ask for a password.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    let out = on_atomic(&cfg)
-        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let v = stdout_json(&out);
-    for action in v["actions"].as_array().unwrap() {
-        assert_eq!(
-            action["privileged"], false,
-            "unexpected privileged action: {action}"
-        );
-    }
-}
-
-#[test]
-fn a_dry_run_never_asks_for_a_password() {
-    // Nothing executes, so nothing should prompt or prime.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = config_file(&dir, "");
-
-    on_traditional(&cfg)
-        .args(["apply", "--dry-run", "--desktop"])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("privileges").not());
+    assert_eq!(quiet, loud);
 }

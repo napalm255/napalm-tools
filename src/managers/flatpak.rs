@@ -4,26 +4,30 @@
 //! installed-check must consult **both** scopes: on a typical desktop the
 //! existing applications were installed system-wide, and treating those as
 //! missing would mean reinstalling every one of them as a user copy.
+//!
+//! The user scope starts with **no remotes** - on this development machine
+//! and on any fresh Fedora - so an install there fails until Flathub has been
+//! added to it. The plan adds it first.
 
 use anyhow::Result;
 use std::collections::HashSet;
 
-use super::{Cmd, Manager, ManagerId};
+use super::{Cmd, Manager, ManagerId, parse_lines};
 use crate::platform::Platform;
 
 /// The Flatpak manager.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Flatpak;
 
-/// Parse `flatpak list --columns=application` output into application IDs.
-pub fn parse_list(output: &str) -> HashSet<String> {
-    super::parse_lines(output)
-}
+/// The remote applications are installed from.
+pub const REMOTE: &str = "flathub";
+/// Where that remote is defined.
+pub const REMOTE_URL: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
 /// Combine the user-scope and system-scope listings.
 pub fn union_scopes(user: &str, system: &str) -> HashSet<String> {
-    let mut set = parse_list(user);
-    set.extend(parse_list(system));
+    let mut set = parse_lines(user);
+    set.extend(parse_lines(system));
     set
 }
 
@@ -36,48 +40,71 @@ impl Manager for Flatpak {
         "flatpak"
     }
 
-    fn platform_ok(&self, _platform: &Platform) -> bool {
-        true
+    fn platform_ok(&self, platform: &Platform) -> bool {
+        // Applications need somewhere to draw; runtimes alone are no use.
+        platform.graphical
     }
 
     fn installed(&self) -> Result<HashSet<String>> {
-        let user = Cmd::new("flatpak", ["list", "--user", "--columns=application"]).output()?;
-        let system = Cmd::new("flatpak", ["list", "--system", "--columns=application"]).output()?;
+        // `--app` so runtimes and extensions are not mistaken for
+        // applications; there are more of them than apps on a typical desktop.
+        let user = Cmd::new(
+            "flatpak",
+            ["list", "--user", "--app", "--columns=application"],
+        )
+        .output()?;
+        let system = Cmd::new(
+            "flatpak",
+            ["list", "--system", "--app", "--columns=application"],
+        )
+        .output()?;
         Ok(union_scopes(&user, &system))
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec![
-            "install".to_string(),
-            "--user".to_string(),
-            "--noninteractive".to_string(),
-        ];
-        args.extend(packages.iter().cloned());
-        Cmd::new("flatpak", args)
+        Cmd::with_packages(
+            "flatpak",
+            &["install", "--user", "--noninteractive", REMOTE],
+            packages,
+        )
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec![
-            "update".to_string(),
-            "--user".to_string(),
-            "--noninteractive".to_string(),
-        ];
-        args.extend(packages.iter().cloned());
-        Cmd::new("flatpak", args)
+        Cmd::with_packages(
+            "flatpak",
+            &["update", "--user", "--noninteractive"],
+            packages,
+        )
+    }
+
+    fn remotes(&self) -> Result<HashSet<String>> {
+        Ok(parse_lines(
+            &Cmd::new("flatpak", ["remotes", "--user", "--columns=name"]).output()?,
+        ))
+    }
+
+    fn add_remote_cmd(&self) -> Option<Cmd> {
+        Some(Cmd::new(
+            "flatpak",
+            [
+                "remote-add",
+                "--user",
+                "--if-not-exists",
+                REMOTE,
+                REMOTE_URL,
+            ],
+        ))
+    }
+
+    fn remote_name(&self) -> Option<&'static str> {
+        Some(REMOTE)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_application_ids() {
-        let set = parse_list("com.spotify.Client\norg.remmina.Remmina\n");
-
-        assert!(set.contains("com.spotify.Client"));
-        assert!(set.contains("org.remmina.Remmina"));
-    }
+    use crate::platform::test_platforms::*;
 
     #[test]
     fn a_system_scope_application_counts_as_installed() {
@@ -102,21 +129,32 @@ mod tests {
     }
 
     #[test]
-    fn installs_go_to_the_user_scope_only() {
+    fn installs_go_to_the_user_scope_from_flathub() {
         let cmd = Flatpak.install_cmd(&["com.spotify.Client".into()]);
 
-        assert!(
-            cmd.args.contains(&"--user".to_string()),
-            "nt must never install into the system scope: {}",
-            cmd.to_shell()
+        assert_eq!(
+            cmd.to_shell(),
+            "flatpak install --user --noninteractive flathub com.spotify.Client",
+            "nt must never install into the system scope"
         );
-        assert!(!cmd.args.contains(&"--system".to_string()));
     }
 
     #[test]
-    fn installs_are_noninteractive() {
-        let cmd = Flatpak.install_cmd(&["com.spotify.Client".into()]);
+    fn the_remote_is_added_to_the_user_scope_idempotently() {
+        let cmd = Flatpak.add_remote_cmd().unwrap();
 
-        assert!(cmd.args.contains(&"--noninteractive".to_string()));
+        assert!(cmd.args.contains(&"--user".to_string()));
+        assert!(cmd.args.contains(&"--if-not-exists".to_string()));
+        assert!(cmd.to_shell().contains(REMOTE_URL));
+        assert!(!cmd.privileged, "the user scope needs no password");
+    }
+
+    #[test]
+    fn flatpak_needs_a_desktop() {
+        assert!(Flatpak.platform_ok(&ATOMIC));
+        assert!(Flatpak.platform_ok(&PLAIN));
+        assert!(!Flatpak.platform_ok(&SERVER));
+        assert!(!Flatpak.platform_ok(&CONTAINER));
+        assert!(!Flatpak.platform_ok(&UNDER_WSL));
     }
 }

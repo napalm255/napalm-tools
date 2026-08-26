@@ -8,22 +8,12 @@
 use anyhow::Result;
 use std::collections::HashSet;
 
-use super::{Cmd, Manager, ManagerId};
+use super::{Cmd, Manager, ManagerId, parse_lines};
 use crate::platform::Platform;
 
 /// The Homebrew manager.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Brew;
-
-/// Parse the output of `brew list --formula -1` into a set of formula names.
-pub fn parse_list(output: &str) -> HashSet<String> {
-    super::parse_lines(output)
-}
-
-/// Parse the output of `brew tap` into a set of tap names.
-pub fn parse_taps(output: &str) -> HashSet<String> {
-    super::parse_lines(output)
-}
 
 /// Parse `brew trust --json v1` into the set of trusted tap paths.
 pub fn parse_trusted(output: &str) -> HashSet<String> {
@@ -60,15 +50,6 @@ pub fn tap_is_trusted(tap: &str, trusted: &HashSet<String>) -> bool {
         .any(|path| path.rsplit('/').next() == Some(dir.as_str()))
 }
 
-impl Brew {
-    /// Explicitly-installed formulae, excluding those pulled in only as
-    /// dependencies. Used for reporting, not for the installed-set diff:
-    /// a formula present as a dependency is still present.
-    pub fn leaves(&self) -> Result<HashSet<String>> {
-        Ok(parse_list(&Cmd::new("brew", ["leaves"]).output()?))
-    }
-}
-
 impl Manager for Brew {
     fn id(&self) -> ManagerId {
         ManagerId::Brew
@@ -83,25 +64,21 @@ impl Manager for Brew {
     }
 
     fn installed(&self) -> Result<HashSet<String>> {
-        Ok(parse_list(
+        Ok(parse_lines(
             &Cmd::new("brew", ["list", "--formula", "-1"]).output()?,
         ))
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["install".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("brew", args)
+        Cmd::with_packages("brew", &["install"], packages)
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["upgrade".to_string()];
-        args.extend(packages.iter().cloned());
-        Cmd::new("brew", args)
+        Cmd::with_packages("brew", &["upgrade"], packages)
     }
 
     fn installed_taps(&self) -> Result<HashSet<String>> {
-        Ok(parse_taps(&Cmd::new("brew", ["tap"]).output()?))
+        Ok(parse_lines(&Cmd::new("brew", ["tap"]).output()?))
     }
 
     fn tap_cmd(&self, tap: &str) -> Option<Cmd> {
@@ -125,7 +102,7 @@ mod tests {
 
     #[test]
     fn parses_one_formula_per_line() {
-        let set = parse_list("bat\nfd\nripgrep\n");
+        let set = parse_lines("bat\nfd\nripgrep\n");
 
         assert_eq!(
             set,
@@ -135,21 +112,14 @@ mod tests {
 
     #[test]
     fn ignores_blank_lines_and_surrounding_whitespace() {
-        let set = parse_list("  bat  \n\n\nfd\n   \n");
+        let set = parse_lines("  bat  \n\n\nfd\n   \n");
 
         assert_eq!(set, HashSet::from(["bat".into(), "fd".into()]));
     }
 
     #[test]
     fn empty_output_is_an_empty_set() {
-        assert!(parse_list("").is_empty());
-    }
-
-    #[test]
-    fn parses_tap_names() {
-        let set = parse_taps("homebrew/core\npowertmux/powertmux\n");
-
-        assert!(set.contains("powertmux/powertmux"));
+        assert!(parse_lines("").is_empty());
     }
 
     #[test]
@@ -176,19 +146,10 @@ mod tests {
 
     #[test]
     fn brew_is_usable_on_every_platform() {
-        let atomic = Platform {
-            fedora_family: true,
-            atomic: true,
-            wsl: false,
-        };
-        let wsl = Platform {
-            fedora_family: true,
-            atomic: false,
-            wsl: true,
-        };
-
-        assert!(Brew.platform_ok(&atomic));
-        assert!(Brew.platform_ok(&wsl));
+        use crate::platform::test_platforms::*;
+        for p in [ATOMIC, PLAIN, SERVER, UNDER_WSL, CONTAINER] {
+            assert!(Brew.platform_ok(&p), "{p:?}");
+        }
     }
 
     const TRUST_JSON: &str = r#"{

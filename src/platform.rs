@@ -17,6 +17,12 @@ pub struct Platform {
     pub atomic: bool,
     /// Running under the Windows Subsystem for Linux.
     pub wsl: bool,
+    /// Running inside a container (podman, docker, toolbox, distrobox).
+    pub container: bool,
+    /// A graphical desktop session is installed. Judged by the presence of
+    /// session files, not by `$DISPLAY`, which is unset in exactly the shells
+    /// - SSH, agents, cron - that most often run a setup tool.
+    pub graphical: bool,
 }
 
 /// The raw evidence platform detection is derived from.
@@ -33,6 +39,10 @@ pub struct Evidence<'a> {
     pub ostree_booted: bool,
     /// Value of `$WSL_DISTRO_NAME`, if set.
     pub wsl_distro_name: Option<&'a str>,
+    /// Whether `/run/.containerenv` or `/.dockerenv` exists.
+    pub container_marker: bool,
+    /// Whether a desktop session directory has any entries.
+    pub session_files: bool,
 }
 
 impl Platform {
@@ -53,6 +63,10 @@ impl Platform {
             fedora_family,
             atomic: ev.ostree_booted,
             wsl,
+            container: ev.container_marker,
+            // A container or WSL box can have session files on disk without
+            // any way to show a window; neither counts as graphical.
+            graphical: ev.session_files && !ev.container_marker && !wsl,
         }
     }
 }
@@ -77,6 +91,9 @@ pub struct Platforms {
     pub exclude_atomic: bool,
     /// Unavailable under WSL.
     pub exclude_wsl: bool,
+    /// Needs a graphical desktop session; skipped on servers, in containers
+    /// and under WSL.
+    pub needs_graphical: bool,
 }
 
 impl Platforms {
@@ -84,21 +101,52 @@ impl Platforms {
     pub const ALL: Platforms = Platforms {
         exclude_atomic: false,
         exclude_wsl: false,
+        needs_graphical: false,
     };
     /// Everywhere except ostree-based systems.
     pub const NOT_ATOMIC: Platforms = Platforms {
         exclude_atomic: true,
         exclude_wsl: false,
+        needs_graphical: false,
     };
     /// Everywhere except WSL.
     pub const NOT_WSL: Platforms = Platforms {
         exclude_atomic: false,
         exclude_wsl: true,
+        needs_graphical: false,
+    };
+    /// Only where a desktop session exists.
+    pub const GRAPHICAL: Platforms = Platforms {
+        exclude_atomic: false,
+        exclude_wsl: false,
+        needs_graphical: true,
     };
 
     /// Whether this constraint admits `platform`.
     pub fn matches(&self, platform: &Platform) -> bool {
-        !(self.exclude_atomic && platform.atomic) && !(self.exclude_wsl && platform.wsl)
+        !(self.exclude_atomic && platform.atomic)
+            && !(self.exclude_wsl && platform.wsl)
+            && !(self.needs_graphical && !platform.graphical)
+    }
+
+    /// Why this constraint rejects `platform`, for reporting. `None` when it
+    /// does not.
+    pub fn rejection(&self, platform: &Platform) -> Option<&'static str> {
+        if self.exclude_atomic && platform.atomic {
+            Some("not usable on an atomic host")
+        } else if self.exclude_wsl && platform.wsl {
+            Some("not applicable under WSL")
+        } else if self.needs_graphical && !platform.graphical {
+            Some(if platform.container {
+                "needs a desktop session; this is a container"
+            } else if platform.wsl {
+                "needs a desktop session; this is WSL"
+            } else {
+                "needs a desktop session; none is installed"
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -113,6 +161,10 @@ pub struct Sources {
     pub kernel_osrelease: PathBuf,
     /// Path to the marker file whose presence indicates an ostree boot.
     pub ostree_marker: PathBuf,
+    /// Marker files whose presence indicates a container.
+    pub container_markers: Vec<PathBuf>,
+    /// Directories whose entries indicate an installed desktop session.
+    pub session_dirs: Vec<PathBuf>,
 }
 
 impl Default for Sources {
@@ -121,13 +173,22 @@ impl Default for Sources {
             os_release: PathBuf::from("/etc/os-release"),
             kernel_osrelease: PathBuf::from("/proc/sys/kernel/osrelease"),
             ostree_marker: PathBuf::from("/run/ostree-booted"),
+            container_markers: vec![
+                PathBuf::from("/run/.containerenv"),
+                PathBuf::from("/.dockerenv"),
+            ],
+            session_dirs: vec![
+                PathBuf::from("/usr/share/wayland-sessions"),
+                PathBuf::from("/usr/share/xsessions"),
+            ],
         }
     }
 }
 
 impl Sources {
-    /// The real system paths, with `NT_OS_RELEASE` and `NT_OSTREE_MARKER`
-    /// honoured as overrides so detection can be exercised end to end.
+    /// The real system paths, with `NT_OS_RELEASE`, `NT_OSTREE_MARKER`,
+    /// `NT_CONTAINER_MARKER` and `NT_SESSION_DIR` honoured as overrides so
+    /// detection can be exercised end to end.
     pub fn system() -> Self {
         let mut s = Sources::default();
         if let Ok(p) = std::env::var("NT_OS_RELEASE") {
@@ -135,6 +196,12 @@ impl Sources {
         }
         if let Ok(p) = std::env::var("NT_OSTREE_MARKER") {
             s.ostree_marker = PathBuf::from(p);
+        }
+        if let Ok(p) = std::env::var("NT_CONTAINER_MARKER") {
+            s.container_markers = vec![PathBuf::from(p)];
+        }
+        if let Ok(p) = std::env::var("NT_SESSION_DIR") {
+            s.session_dirs = vec![PathBuf::from(p)];
         }
         s
     }
@@ -157,8 +224,71 @@ impl Platform {
             kernel_osrelease: &kernel_osrelease,
             ostree_booted: sources.ostree_marker.exists(),
             wsl_distro_name: wsl_distro_name.as_deref(),
+            container_marker: sources.container_markers.iter().any(|p| p.exists()),
+            session_files: sources.session_dirs.iter().any(|d| dir_has_entries(d)),
         })
     }
+}
+
+/// Whether `dir` exists and contains at least one entry.
+fn dir_has_entries(dir: &std::path::Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Fixed platforms for tests across the crate, so each module does not
+/// redefine its own slightly different set.
+#[cfg(test)]
+pub mod test_platforms {
+    use super::Platform;
+
+    /// Bluefin: atomic, graphical.
+    pub const ATOMIC: Platform = Platform {
+        fedora_family: true,
+        atomic: true,
+        wsl: false,
+        container: false,
+        graphical: true,
+    };
+    /// Fedora Workstation: mutable, graphical.
+    pub const PLAIN: Platform = Platform {
+        fedora_family: true,
+        atomic: false,
+        wsl: false,
+        container: false,
+        graphical: true,
+    };
+    /// Fedora Server: mutable, no desktop.
+    pub const SERVER: Platform = Platform {
+        fedora_family: true,
+        atomic: false,
+        wsl: false,
+        container: false,
+        graphical: false,
+    };
+    /// Fedora under WSL.
+    pub const UNDER_WSL: Platform = Platform {
+        fedora_family: true,
+        atomic: false,
+        wsl: true,
+        container: false,
+        graphical: false,
+    };
+    /// The official Fedora container image.
+    pub const CONTAINER: Platform = Platform {
+        fedora_family: true,
+        atomic: false,
+        wsl: false,
+        container: true,
+        graphical: false,
+    };
+    /// Something outside the Fedora family.
+    pub const UBUNTU: Platform = Platform {
+        fedora_family: false,
+        atomic: false,
+        wsl: false,
+        container: false,
+        graphical: true,
+    };
 }
 
 #[cfg(test)]
@@ -189,6 +319,7 @@ ID_LIKE=debian
             kernel_osrelease: "7.0.12-201.fc44.x86_64",
             ostree_booted: true,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(p.atomic, "ostree-booted marker must mean atomic");
     }
@@ -201,6 +332,7 @@ ID_LIKE=debian
             kernel_osrelease: "7.0.12-201.fc44.x86_64",
             ostree_booted: true,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(p.fedora_family, "ID_LIKE=fedora must establish the family");
     }
@@ -212,6 +344,7 @@ ID_LIKE=debian
             kernel_osrelease: "6.11.0-1.fc44.x86_64",
             ostree_booted: false,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(!p.atomic);
         assert!(p.fedora_family);
@@ -224,6 +357,7 @@ ID_LIKE=debian
             kernel_osrelease: "6.8.0-generic",
             ostree_booted: false,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(!p.fedora_family);
     }
@@ -235,6 +369,7 @@ ID_LIKE=debian
             kernel_osrelease: "5.15.153.1-microsoft-standard-WSL2",
             ostree_booted: false,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(p.wsl);
     }
@@ -246,6 +381,7 @@ ID_LIKE=debian
             kernel_osrelease: "6.11.0-1.fc44.x86_64",
             ostree_booted: false,
             wsl_distro_name: Some("FedoraLinux-44"),
+            ..Default::default()
         });
         assert!(p.wsl);
     }
@@ -257,6 +393,7 @@ ID_LIKE=debian
             kernel_osrelease: "6.11.0-1.fc44.x86_64",
             ostree_booted: false,
             wsl_distro_name: None,
+            ..Default::default()
         });
         assert!(!p.wsl);
     }
@@ -272,6 +409,8 @@ ID_LIKE=debian
             os_release: dir.join("os-release"),
             kernel_osrelease: dir.join("osrelease"),
             ostree_marker: dir.join("ostree-booted"),
+            container_markers: vec![dir.join("containerenv")],
+            session_dirs: vec![dir.join("sessions")],
         }
     }
 
@@ -304,6 +443,8 @@ ID_LIKE=debian
             os_release: PathBuf::from("/nonexistent/os-release"),
             kernel_osrelease: PathBuf::from("/nonexistent/osrelease"),
             ostree_marker: PathBuf::from("/nonexistent/ostree-booted"),
+            container_markers: vec![PathBuf::from("/nonexistent/containerenv")],
+            session_dirs: vec![PathBuf::from("/nonexistent/sessions")],
         };
 
         let p = Platform::detect_from(&sources, None);
@@ -311,23 +452,64 @@ ID_LIKE=debian
         assert!(!p.fedora_family);
         assert!(!p.atomic);
         assert!(!p.wsl);
+        assert!(!p.container);
+        assert!(!p.graphical);
     }
 
-    const ATOMIC: Platform = Platform {
-        fedora_family: true,
-        atomic: true,
-        wsl: false,
-    };
-    const PLAIN: Platform = Platform {
-        fedora_family: true,
-        atomic: false,
-        wsl: false,
-    };
-    const UNDER_WSL: Platform = Platform {
-        fedora_family: true,
-        atomic: false,
-        wsl: true,
-    };
+    #[test]
+    fn a_container_marker_means_container_and_never_graphical() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = fixture(dir.path(), FEDORA, "6.11.0-1.fc44.x86_64", false);
+        fs::write(dir.path().join("containerenv"), "").unwrap();
+        fs::create_dir(dir.path().join("sessions")).unwrap();
+        fs::write(dir.path().join("sessions/gnome.desktop"), "").unwrap();
+
+        let p = Platform::detect_from(&sources, None);
+
+        assert!(p.container);
+        assert!(
+            !p.graphical,
+            "session files inside a container mean nothing"
+        );
+    }
+
+    #[test]
+    fn session_files_mean_graphical_on_an_ordinary_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = fixture(dir.path(), FEDORA, "6.11.0-1.fc44.x86_64", false);
+        fs::create_dir(dir.path().join("sessions")).unwrap();
+        fs::write(dir.path().join("sessions/gnome.desktop"), "").unwrap();
+
+        let p = Platform::detect_from(&sources, None);
+
+        assert!(p.graphical);
+    }
+
+    #[test]
+    fn an_empty_session_directory_is_a_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = fixture(dir.path(), FEDORA, "6.11.0-1.fc44.x86_64", false);
+        fs::create_dir(dir.path().join("sessions")).unwrap();
+
+        let p = Platform::detect_from(&sources, None);
+
+        assert!(!p.graphical);
+    }
+
+    #[test]
+    fn wsl_is_never_graphical() {
+        let p = Platform::from_evidence(Evidence {
+            os_release: FEDORA,
+            kernel_osrelease: "5.15.153.1-microsoft-standard-WSL2",
+            session_files: true,
+            ..Default::default()
+        });
+
+        assert!(p.wsl);
+        assert!(!p.graphical);
+    }
+
+    use super::test_platforms::{ATOMIC, CONTAINER, PLAIN, SERVER, UNDER_WSL};
 
     #[test]
     fn unconstrained_matches_every_platform() {
@@ -355,9 +537,36 @@ ID_LIKE=debian
         let both = Platforms {
             exclude_atomic: true,
             exclude_wsl: true,
+            needs_graphical: false,
         };
         assert!(!both.matches(&ATOMIC));
         assert!(!both.matches(&UNDER_WSL));
         assert!(both.matches(&PLAIN));
+    }
+
+    #[test]
+    fn graphical_rejects_servers_containers_and_wsl() {
+        assert!(Platforms::GRAPHICAL.matches(&ATOMIC));
+        assert!(Platforms::GRAPHICAL.matches(&PLAIN));
+        assert!(!Platforms::GRAPHICAL.matches(&SERVER));
+        assert!(!Platforms::GRAPHICAL.matches(&CONTAINER));
+        assert!(!Platforms::GRAPHICAL.matches(&UNDER_WSL));
+    }
+
+    #[test]
+    fn a_rejection_explains_itself() {
+        assert!(Platforms::GRAPHICAL.rejection(&PLAIN).is_none());
+        assert!(
+            Platforms::GRAPHICAL
+                .rejection(&CONTAINER)
+                .unwrap()
+                .contains("container")
+        );
+        assert!(
+            Platforms::NOT_ATOMIC
+                .rejection(&ATOMIC)
+                .unwrap()
+                .contains("atomic")
+        );
     }
 }

@@ -13,10 +13,13 @@ use crate::plan::ActionPlan;
 
 /// Whether any step in the plan may need elevated privileges.
 pub fn plan_needs_privileges(plan: &ActionPlan) -> bool {
-    plan.actions.iter().any(|a| a.to_cmd().privileged) || plan.dotfiles.iter().any(|c| c.privileged)
+    plan.commands().iter().any(|c| c.privileged)
 }
 
 /// Whether any chezmoi run script invokes `sudo`.
+///
+/// Looks in the source directory itself and in `.chezmoiscripts/`, the
+/// documented home for scripts that should not also be dotfiles.
 ///
 /// A heuristic, and deliberately a shallow one: these are the user's own
 /// scripts, so the only way to know is to look, and parsing shell to be sure
@@ -24,18 +27,28 @@ pub fn plan_needs_privileges(plan: &ActionPlan) -> bool {
 /// positive costs one unnecessary password prompt, and a false negative leaves
 /// that step behaving as it did before, prompting on a terminal it still has.
 pub fn scripts_use_sudo(source_dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(source_dir) else {
-        return false;
-    };
-    entries.filter_map(Result::ok).any(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        // Only `run_` scripts execute; anything else is just a dotfile.
-        if !name.starts_with("run_") {
-            return false;
+    run_scripts(source_dir)
+        .into_iter()
+        .any(|path| std::fs::read_to_string(path).is_ok_and(|text| mentions_sudo(&text)))
+}
+
+/// Every `run_*` script under `source_dir`, one level deep into
+/// `.chezmoiscripts/`.
+fn run_scripts(source_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for dir in [source_dir.to_path_buf(), source_dir.join(".chezmoiscripts")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            // Only `run_` scripts execute; anything else is just a dotfile.
+            if name.to_string_lossy().starts_with("run_") && entry.path().is_file() {
+                found.push(entry.path());
+            }
         }
-        std::fs::read_to_string(entry.path()).is_ok_and(|text| mentions_sudo(&text))
-    })
+    }
+    found
 }
 
 /// Whether the script text invokes sudo, ignoring comment lines.
@@ -136,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn a_script_in_the_chezmoiscripts_directory_is_scanned() {
+        // chezmoi's documented home for scripts; the common layout.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".chezmoiscripts")).unwrap();
+        write(
+            &dir.path().join(".chezmoiscripts"),
+            "run_once_after_setup.sh",
+            "#!/bin/bash\nsudo systemctl enable something\n",
+        );
+
+        assert!(scripts_use_sudo(dir.path()));
+    }
+
+    #[test]
     fn a_non_run_file_is_ignored() {
         // Only run_ scripts execute; a dotfile mentioning sudo is just text.
         let dir = tempfile::tempdir().unwrap();
@@ -163,6 +190,16 @@ mod tests {
                 manager: ManagerId::Dnf,
                 packages: vec!["xdotool".into()],
             }],
+            ..Default::default()
+        };
+
+        assert!(plan_needs_privileges(&plan));
+    }
+
+    #[test]
+    fn a_privileged_bootstrap_step_needs_privileges() {
+        let plan = ActionPlan {
+            bootstrap: vec![Cmd::new("sudo", ["dnf", "install", "-y", "git"]).privileged()],
             ..Default::default()
         };
 
