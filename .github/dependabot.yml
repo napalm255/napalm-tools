@@ -1,0 +1,15 @@
+# Tool versions in mise.toml are not covered here; Dependabot has no mise
+# ecosystem. Bump those deliberately with `mise upgrade`.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
