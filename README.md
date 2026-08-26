@@ -73,11 +73,45 @@ could only contradict itself is refused rather than accepted and ignored:
 `nt version` takes no flags at all, and neither does `nt completions`.
 `--config`, `--output` and `-v` reach every command that resolves
 configuration.
-| `-v` | raw passthrough, spinner off | info |
+| `-v` | raw passthrough, terminal handed over, spinner off | info |
 | `-vv` | raw passthrough | debug |
 
 Homebrew's `==> Caveats` blocks and deprecation warnings are collected while
 scrolling past and shown once at the end, where they can be read.
+
+### Commands that want to ask a question
+
+Closing stdin does not stop a prompt: `sudo`, `ssh`, `gpg` and `git` read from
+`/dev/tty` directly. A prompt would therefore appear beneath the live spinner,
+garbled or invisible, while the run waited forever.
+
+So ordinary steps are detached from the controlling terminal. A command that
+tries to prompt fails immediately with a readable message instead of hanging,
+and the error says how to answer it:
+
+```
+  [3/3] chezmoi apply FAILED (0.3s)
+error: `chezmoi apply` exit status: 1
+  sudo: a terminal is required to read the password
+
+hint: this command wanted to prompt; re-run with -v to give it the terminal
+```
+
+Steps that may *legitimately* need privileges are handled differently. `nt`
+works out in advance whether a run needs a password - dnf actions always do,
+and chezmoi is checked by scanning its `run_` scripts for `sudo` - and if so
+asks once, before anything executes and before the spinner starts. A refused
+password then costs nothing, because nothing has run.
+
+Those steps keep the terminal, since sudo's cached credential is bound to the
+terminal it was entered on. `nt apply --dry-run --output json` reports which
+steps are `privileged`, so you can see what a run will ask for before starting
+it.
+
+The scan of your chezmoi scripts is a heuristic, and a shallow one: they are
+your scripts, so the only way to know is to look. A false positive costs one
+unnecessary prompt; a false negative leaves that step prompting on a terminal
+it still has.
 
 ### Machine-readable
 
