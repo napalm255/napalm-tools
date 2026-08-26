@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use napalm_tools::ui::{Format, Ui, json};
-use napalm_tools::{cli, config, dotfiles, execute, plan, platform, report};
+use napalm_tools::{cli, config, dotfiles, execute, plan, platform, privilege, report};
 
 /// Exit code used when `--strict` is set and some package has no provider.
 const EXIT_UNMET: u8 = 2;
@@ -174,8 +174,12 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let mut built = plan::build(&resolved, &platform, &snapshot);
 
             let home = std::env::var("HOME").unwrap_or_default();
-            let source_exists = dotfiles::source_dir(std::path::Path::new(&home)).exists();
-            built.dotfiles = dotfiles::plan(&resolved.dotfiles, source_exists)?;
+            let source = dotfiles::source_dir(std::path::Path::new(&home));
+            built.dotfiles = dotfiles::plan(
+                &resolved.dotfiles,
+                source.exists(),
+                privilege::scripts_use_sudo(&source),
+            )?;
 
             let json_mode = ui.format() == Format::Json;
 

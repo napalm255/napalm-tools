@@ -80,11 +80,40 @@ fn binaries_on_path() -> HashSet<String> {
 
 /// Run every action in a plan, in order.
 pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
+    // Ask for the password before anything runs and before the spinner starts,
+    // so a refusal costs nothing and the prompt is the only thing on screen.
+    if crate::privilege::plan_needs_privileges(plan) && !crate::privilege::already_authorised() {
+        ui.line("Some steps need elevated privileges.");
+        crate::privilege::prime()?;
+    }
+
     let mut commands: Vec<Cmd> = plan.actions.iter().map(|a| a.to_cmd()).collect();
     // Dotfiles come last, so chezmoi itself can have been installed by the
     // package actions above on a fresh machine.
     commands.extend(plan.dotfiles.iter().cloned());
     run_commands(&commands, ui)
+}
+
+/// Whether a failure looks like a command that wanted to ask a question.
+///
+/// Used only to attach a hint; getting it wrong costs a missing or spurious
+/// line of advice, nothing more.
+pub fn looks_like_a_prompt_failure(tail: &str) -> bool {
+    const SIGNS: &[&str] = &[
+        "a terminal is required",
+        "terminal prompts disabled",
+        "no tty present",
+        "askpass",
+        "a password is required",
+        "could not read Username",
+        "could not read Password",
+        "Permission denied (publickey",
+        "Host key verification failed",
+    ];
+    let lower = tail.to_ascii_lowercase();
+    SIGNS
+        .iter()
+        .any(|s| lower.contains(&s.to_ascii_lowercase()))
 }
 
 /// Run a sequence of commands, stopping at the first failure.
@@ -128,6 +157,13 @@ pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
             let tail = outcome.tail_text();
             if tail.is_empty() {
                 anyhow::bail!("`{label}` {}", outcome.status);
+            }
+            if looks_like_a_prompt_failure(&tail) {
+                anyhow::bail!(
+                    "`{label}` {}\n{tail}\n\nhint: this command wanted to prompt; \
+                     re-run with -v to give it the terminal",
+                    outcome.status
+                );
             }
             anyhow::bail!("`{label}` {}\n{tail}", outcome.status);
         }
@@ -251,5 +287,59 @@ mod tests {
         let report = run_commands(&[Cmd::new("sh", ["-c", "exit 0"])], &ui()).unwrap();
 
         assert!(report.total >= report.steps[0].duration);
+    }
+
+    #[test]
+    fn a_prompt_related_failure_is_recognised() {
+        // The exact strings these tools emit, as measured.
+        for tail in [
+            "sudo: a terminal is required to read the password",
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "sudo: no tty present and no askpass program specified",
+            "Host key verification failed.",
+        ] {
+            assert!(looks_like_a_prompt_failure(tail), "missed: {tail}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_not_mistaken_for_one() {
+        for tail in [
+            "Error: No available formula with the name \"nosuchpkg\"",
+            "npm error code E404",
+            "disk quota exceeded",
+        ] {
+            assert!(!looks_like_a_prompt_failure(tail), "false positive: {tail}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_failure_carries_the_hint() {
+        let cmds = vec![Cmd::new(
+            "sh",
+            [
+                "-c",
+                "echo 'sudo: a terminal is required to read the password' 1>&2; exit 1",
+            ],
+        )];
+
+        let err = run_commands(&cmds, &ui()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("re-run with -v"), "got {err:#}");
+    }
+
+    #[test]
+    fn an_ordinary_failure_carries_no_hint() {
+        let cmds = vec![Cmd::new(
+            "sh",
+            ["-c", "echo 'no such formula' 1>&2; exit 1"],
+        )];
+
+        let err = run_commands(&cmds, &ui()).unwrap_err();
+
+        assert!(
+            !format!("{err:#}").contains("re-run with -v"),
+            "got {err:#}"
+        );
     }
 }

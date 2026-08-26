@@ -18,7 +18,23 @@ pub fn source_dir(home: &Path) -> PathBuf {
 ///
 /// Returns an empty list when there is nothing to do, so the caller does not
 /// need to special-case a disabled configuration.
-pub fn plan(config: &DotfilesConfig, source_exists: bool) -> Result<Vec<Cmd>> {
+///
+/// `may_need_privileges` marks the step so the run asks for a password up
+/// front. chezmoi runs the user's own `run_` scripts, which may legitimately
+/// use sudo, and a prompt arriving mid-run lands underneath the spinner where
+/// it cannot be seen.
+pub fn plan(
+    config: &DotfilesConfig,
+    source_exists: bool,
+    may_need_privileges: bool,
+) -> Result<Vec<Cmd>> {
+    let mark = |cmd: Cmd| {
+        if may_need_privileges {
+            cmd.privileged()
+        } else {
+            cmd
+        }
+    };
     if !config.enabled {
         return Ok(Vec::new());
     }
@@ -29,10 +45,10 @@ pub fn plan(config: &DotfilesConfig, source_exists: bool) -> Result<Vec<Cmd>> {
     if !source_exists {
         // Nothing on disk yet, so the clone has to happen whatever the
         // per-run apply preference says.
-        return Ok(vec![Cmd::new("chezmoi", ["init", "--apply", repo])]);
+        return Ok(vec![mark(Cmd::new("chezmoi", ["init", "--apply", repo]))]);
     }
     if config.apply {
-        return Ok(vec![Cmd::new("chezmoi", ["apply"])]);
+        return Ok(vec![mark(Cmd::new("chezmoi", ["apply"]))]);
     }
     Ok(Vec::new())
 }
@@ -57,13 +73,14 @@ mod tests {
             apply: true,
         };
 
-        assert!(plan(&cfg, false).unwrap().is_empty());
+        assert!(plan(&cfg, false, false).unwrap().is_empty());
     }
 
     #[test]
     fn a_fresh_machine_is_initialised_and_applied_in_one_step() {
         let cmds = plan(
             &enabled("https://github.com/napalm255/dotfiles", true),
+            false,
             false,
         )
         .unwrap();
@@ -80,6 +97,7 @@ mod tests {
         let cmds = plan(
             &enabled("https://github.com/napalm255/dotfiles", true),
             true,
+            false,
         )
         .unwrap();
 
@@ -92,6 +110,7 @@ mod tests {
         let cmds = plan(
             &enabled("https://github.com/napalm255/dotfiles", false),
             true,
+            false,
         )
         .unwrap();
 
@@ -104,6 +123,7 @@ mod tests {
         // to happen regardless of the per-run apply preference.
         let cmds = plan(
             &enabled("https://github.com/napalm255/dotfiles", false),
+            false,
             false,
         )
         .unwrap();
@@ -120,7 +140,7 @@ mod tests {
             apply: true,
         };
 
-        let err = plan(&cfg, false).unwrap_err();
+        let err = plan(&cfg, false, false).unwrap_err();
 
         assert!(
             format!("{err:#}").contains("repo"),
@@ -134,5 +154,31 @@ mod tests {
             source_dir(Path::new("/home/napalm")),
             PathBuf::from("/home/napalm/.local/share/chezmoi")
         );
+    }
+
+    #[test]
+    fn a_step_that_may_need_privileges_is_marked() {
+        let cmds = plan(&enabled("https://example.com/d", true), true, true).unwrap();
+
+        assert!(
+            cmds[0].privileged,
+            "the run must know to ask for a password up front"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_step_is_not_marked() {
+        let cmds = plan(&enabled("https://example.com/d", true), true, false).unwrap();
+
+        assert!(!cmds[0].privileged);
+    }
+
+    #[test]
+    fn the_initial_clone_is_marked_too() {
+        // `chezmoi init --apply` runs the same scripts as `chezmoi apply`.
+        let cmds = plan(&enabled("https://example.com/d", true), false, true).unwrap();
+
+        assert!(cmds[0].to_shell().starts_with("chezmoi init"));
+        assert!(cmds[0].privileged);
     }
 }
