@@ -33,6 +33,12 @@ impl Manager for Dnf {
         !platform.atomic && platform.fedora_family
     }
 
+    fn available(&self, platform: &Platform) -> bool {
+        // Every write needs sudo, so without it dnf is no use here whatever
+        // the platform says.
+        self.platform_ok(platform) && super::on_path(self.binary()) && super::on_path("sudo")
+    }
+
     fn installed(&self) -> Result<HashSet<String>> {
         Ok(parse_installed(
             &Cmd::new("rpm", ["-qa", "--queryformat", "%{NAME}\n"]).output()?,
@@ -40,15 +46,15 @@ impl Manager for Dnf {
     }
 
     fn install_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["install".to_string(), "-y".to_string()];
+        let mut args = vec!["dnf".to_string(), "install".to_string(), "-y".to_string()];
         args.extend(packages.iter().cloned());
-        Cmd::new("dnf", args)
+        Cmd::new("sudo", args).privileged()
     }
 
     fn upgrade_cmd(&self, packages: &[String]) -> Cmd {
-        let mut args = vec!["upgrade".to_string(), "-y".to_string()];
+        let mut args = vec!["dnf".to_string(), "upgrade".to_string(), "-y".to_string()];
         args.extend(packages.iter().cloned());
-        Cmd::new("dnf", args)
+        Cmd::new("sudo", args).privileged()
     }
 }
 
@@ -110,5 +116,34 @@ mod tests {
     #[test]
     fn empty_output_is_an_empty_set() {
         assert!(parse_installed("").is_empty());
+    }
+
+    #[test]
+    fn install_escalates_privileges() {
+        // Without sudo the command cannot succeed at all: dnf refuses to run
+        // as a normal user.
+        let cmd = Dnf.install_cmd(&["xdotool".into()]);
+
+        assert_eq!(cmd.to_shell(), "sudo dnf install -y xdotool");
+    }
+
+    #[test]
+    fn upgrade_escalates_privileges() {
+        let cmd = Dnf.upgrade_cmd(&["xdotool".into()]);
+
+        assert_eq!(cmd.to_shell(), "sudo dnf upgrade -y xdotool");
+    }
+
+    #[test]
+    fn dnf_commands_are_marked_privileged() {
+        // So the run primes sudo up front and keeps the terminal for them.
+        assert!(Dnf.install_cmd(&["xdotool".into()]).privileged);
+        assert!(Dnf.upgrade_cmd(&["xdotool".into()]).privileged);
+    }
+
+    #[test]
+    fn querying_installed_packages_needs_no_privileges() {
+        // rpm reads the database as any user; only writes need sudo.
+        assert!(!Cmd::new("rpm", ["-qa"]).privileged);
     }
 }
