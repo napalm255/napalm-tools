@@ -83,7 +83,11 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let shell = *sub
                 .get_one::<clap_complete::Shell>("shell")
                 .expect("shell is required");
-            clap_complete::generate(shell, &mut cli::command(), "nt", &mut std::io::stdout());
+            // Through the Ui rather than straight to stdout, so `--quiet`
+            // means quiet here too rather than having one exception.
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut cli::command(), "nt", &mut script);
+            ui.data(&String::from_utf8_lossy(&script));
             Ok(ExitCode::SUCCESS)
         }
 

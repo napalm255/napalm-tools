@@ -98,11 +98,16 @@ impl Ui {
 
     /// A `Ui` capturing everything, with a handle to inspect what it wrote.
     pub fn capturing(format: Format) -> (Ui, Arc<Mutex<Captured>>) {
+        Ui::capturing_quiet(format, false)
+    }
+
+    /// A capturing `Ui` with an explicit quiet setting.
+    pub fn capturing_quiet(format: Format, quiet: bool) -> (Ui, Arc<Mutex<Captured>>) {
         let buf = Arc::new(Mutex::new(Captured::default()));
         let ui = Ui {
             format,
             verbosity: 0,
-            quiet: false,
+            quiet,
             sink: Sink::Capture(Arc::clone(&buf)),
             progress: progress::Progress::disabled(),
         };
@@ -120,7 +125,14 @@ impl Ui {
     }
 
     /// Write the answer to stdout, exactly as given.
+    ///
+    /// Suppressed by `--quiet`, which means silence on success - including
+    /// the answer. Asking for quiet and for output at once is contradictory,
+    /// and quiet is the more specific request.
     pub fn data(&self, text: &str) {
+        if self.quiet {
+            return;
+        }
         self.write_out(text);
     }
 
@@ -135,9 +147,12 @@ impl Ui {
         self.write_err(&format!("{msg}\n"));
     }
 
-    /// Write a warning to stderr. Suppressed only by JSON mode.
+    /// Write a warning to stderr.
+    ///
+    /// Suppressed by JSON mode, where it would corrupt the document, and by
+    /// `--quiet`, where only failures are worth breaking silence for.
     pub fn warn(&self, msg: &str) {
-        if self.format == Format::Json {
+        if self.quiet || self.format == Format::Json {
             return;
         }
         self.write_err(&format!("warning: {msg}\n"));
@@ -173,13 +188,24 @@ impl Ui {
     }
 
     /// Write the end-of-run summary to stderr.
+    ///
+    /// Under `--quiet` only a failure is reported: silence means success.
     pub fn summary(&self, report: &RunReport) {
-        if self.quiet || self.format == Format::Json {
+        if self.format == Format::Json {
+            return;
+        }
+        let failed = report.steps.iter().filter(|s| !s.success).count();
+        if self.quiet {
+            if failed > 0 {
+                self.write_err(&format!(
+                    "{failed} step{} failed\n",
+                    if failed == 1 { "" } else { "s" }
+                ));
+            }
             return;
         }
 
         if !report.steps.is_empty() {
-            let failed = report.steps.iter().filter(|s| !s.success).count();
             let mut line = format!(
                 "\n{} step{} in {}",
                 report.steps.len(),
@@ -437,5 +463,52 @@ mod tests {
         assert_eq!(Format::from_str("plain").unwrap(), Format::Plain);
         assert_eq!(Format::from_str("pretty").unwrap(), Format::Pretty);
         assert!(Format::from_str("fancy").is_err());
+    }
+
+    #[test]
+    fn quiet_suppresses_everything_but_errors() {
+        // `-q` means silence on success, including the answer itself.
+        let (ui, buf) = Ui::capturing_quiet(Format::Plain, true);
+
+        ui.data("core  on\n");
+        ui.line("starting");
+        ui.warn("something odd");
+        ui.step(1, 1, "brew install nmap")
+            .finish(true, Duration::from_secs(1));
+        ui.summary(&RunReport::default());
+
+        assert!(out(&buf).is_empty(), "stdout not silent: {:?}", out(&buf));
+        assert!(err(&buf).is_empty(), "stderr not silent: {:?}", err(&buf));
+    }
+
+    #[test]
+    fn quiet_still_reports_errors() {
+        // Silence on success; never silence on failure.
+        let (ui, buf) = Ui::capturing_quiet(Format::Plain, true);
+
+        ui.error("it broke");
+
+        assert!(err(&buf).contains("it broke"));
+    }
+
+    #[test]
+    fn quiet_does_not_suppress_a_failed_step_summary() {
+        let (ui, buf) = Ui::capturing_quiet(Format::Plain, true);
+        let report = RunReport {
+            steps: vec![crate::execute::StepOutcome {
+                command: "brew install broken".into(),
+                duration: Duration::from_secs(1),
+                success: false,
+            }],
+            ..Default::default()
+        };
+
+        ui.summary(&report);
+
+        assert!(
+            err(&buf).contains("failed"),
+            "a failure must survive --quiet, got {:?}",
+            err(&buf)
+        );
     }
 }

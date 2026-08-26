@@ -496,3 +496,50 @@ fn status_emits_valid_json() {
 
     assert!(stdout_json(&out)["actions"].is_array());
 }
+
+#[test]
+fn quiet_is_silent_on_success() {
+    // Silence means it worked; anything printed would defeat the flag.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let assert = on_atomic(&cfg)
+        .args(["apply", "--dry-run", "-q"])
+        .assert()
+        .success();
+    let out = assert.get_output();
+
+    assert!(
+        out.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn quiet_still_reports_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "[bundles]\ndevv = true\n");
+
+    on_atomic(&cfg)
+        .args(["bundles", "-q"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("devv"));
+}
+
+#[test]
+fn quiet_silences_query_commands_too() {
+    // Consistency: -q means quiet everywhere, with no exceptions to remember.
+    Command::cargo_bin("nt")
+        .unwrap()
+        .args(["version", "-q"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+}
