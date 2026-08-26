@@ -298,10 +298,11 @@ static AI: &[Pkg] = &[
         providers: &[Provider::new(ManagerId::Npm, "@openai/codex")],
     },
     // No npm package exists; the one named `antigravity` on npm is an
-    // unrelated placeholder and must not be used.
+    // unrelated placeholder and must not be used. The cask installs its
+    // binary as `agy`, not `antigravity`.
     Pkg {
         name: "antigravity-cli",
-        binary: Some("antigravity"),
+        binary: Some("agy"),
         providers: &[Provider::new(ManagerId::BrewCask, "antigravity-cli")],
     },
 ];
