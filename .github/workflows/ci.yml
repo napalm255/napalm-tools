@@ -6,6 +6,8 @@ on:
   pull_request:
   # release.yml runs this whole workflow before it publishes anything.
   workflow_call:
+  # `gh workflow run ci --ref <branch>` when an event was missed.
+  workflow_dispatch:
 
 permissions:
   contents: read
