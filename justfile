@@ -53,6 +53,10 @@ run *args:
 clean:
     cargo clean
 
+# Check catalog binary names against what is actually installed
+audit:
+    ./scripts/audit-binaries.py
+
 # Everything CI runs, in order
 ci: lint test security
 
