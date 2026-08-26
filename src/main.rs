@@ -207,7 +207,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 let upcoming: Vec<_> = bootstrap.iter().chain(&dotfiles).cloned().collect();
                 execute::prime_for(&upcoming, ui)?;
                 ui.line("Bootstrapping package managers.");
-                let report = execute::run_commands(&bootstrap, ui)?;
+                let report = execute::run_bootstrap(&bootstrap, ui)?;
                 if let Some(step) = report.steps.iter().find(|s| !s.success) {
                     bail!(
                         "bootstrap failed at `{}`:\n{}",

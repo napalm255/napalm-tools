@@ -217,6 +217,14 @@ pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
     run_commands_numbered(commands, 0, commands.len(), false, ui)
 }
 
+/// Run the bootstrap phase on its own, stopping at the first failure: each
+/// step is a precondition of the next, so going on would only produce a
+/// second, misleading error about the manager the failed step was meant to
+/// install. The caller primes sudo, since it knows about later phases too.
+pub fn run_bootstrap(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
+    run_commands_numbered(commands, 0, commands.len(), true, ui)
+}
+
 /// Run `commands` numbered from `offset + 1` out of `total`. With
 /// `stop_on_failure`, the phase ends at the first failure.
 fn run_commands_numbered(
