@@ -96,33 +96,38 @@ fn apply(sb: &Sandbox, host: Host, config: &str) -> Command {
         Host::Container => ("os-release-fedora", false, true, false),
     };
     let mut cmd = Command::cargo_bin("nt").unwrap();
-    cmd.env_clear()
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", fixtures().join("fake-bin").display()),
-        )
-        .env("HOME", &sb.home)
-        .env("NT_TOOL_DIRS", &sb.tools)
-        .env("FAKE_LOG", &sb.log)
-        .env("FAKE_TOOL_DIR", &sb.tools)
-        .env("NT_CONFIG", config)
-        .env("NT_HOSTNAME", "testhost.example.com")
-        .env("NT_OS_RELEASE", fixtures().join(os_release))
-        .env("NT_OSTREE_MARKER", if atomic { &exists } else { &missing })
-        .env(
-            "NT_CONTAINER_MARKER",
-            if container { &exists } else { &missing },
-        )
-        .env(
-            "NT_SESSION_DIR",
-            if graphical {
-                fixtures().join("sessions")
-            } else {
-                PathBuf::from("/nonexistent/sessions")
-            },
-        )
-        .env("NO_COLOR", "1")
-        .args(["apply", "--only", "core", "--skip", "core"]);
+    cmd.env_clear();
+    // Under cargo-llvm-cov the spawned binary must keep writing its profile
+    // where the run collects it, or its coverage is lost to a stray file.
+    if let Ok(profile) = std::env::var("LLVM_PROFILE_FILE") {
+        cmd.env("LLVM_PROFILE_FILE", profile);
+    }
+    cmd.env(
+        "PATH",
+        format!("{}:/usr/bin:/bin", fixtures().join("fake-bin").display()),
+    )
+    .env("HOME", &sb.home)
+    .env("NT_TOOL_DIRS", &sb.tools)
+    .env("FAKE_LOG", &sb.log)
+    .env("FAKE_TOOL_DIR", &sb.tools)
+    .env("NT_CONFIG", config)
+    .env("NT_HOSTNAME", "testhost.example.com")
+    .env("NT_OS_RELEASE", fixtures().join(os_release))
+    .env("NT_OSTREE_MARKER", if atomic { &exists } else { &missing })
+    .env(
+        "NT_CONTAINER_MARKER",
+        if container { &exists } else { &missing },
+    )
+    .env(
+        "NT_SESSION_DIR",
+        if graphical {
+            fixtures().join("sessions")
+        } else {
+            PathBuf::from("/nonexistent/sessions")
+        },
+    )
+    .env("NO_COLOR", "1")
+    .args(["apply", "--only", "core", "--skip", "core"]);
     cmd
 }
 

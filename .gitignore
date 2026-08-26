@@ -2,3 +2,4 @@
 /completions
 /dist
 /.ruff_cache
+*.profraw

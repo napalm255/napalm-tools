@@ -14,7 +14,7 @@ shell_files := "scripts/clean.sh tests/e2e/run.sh tests/e2e/inside.sh tests/fixt
 
 # Line coverage the test suite must keep. Set from the measured baseline;
 # raise it as coverage grows, never lower it to get a build through.
-coverage_floor := "94"
+coverage_floor := "95"
 
 # Install the toolchain (rust-toolchain.toml) and every dev tool (mise.toml)
 setup:
