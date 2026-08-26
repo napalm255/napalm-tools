@@ -8,7 +8,7 @@
   "runArgs": ["--userns=keep-id"],
   "workspaceFolder": "/workspaces/napalm-tools",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/napalm-tools,type=bind,Z",
-  "postCreateCommand": "mise trust && mise install && just setup",
+  "postCreateCommand": "mise trust --quiet && mise install --yes just && just setup",
   "customizations": {
     "vscode": {
       "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]

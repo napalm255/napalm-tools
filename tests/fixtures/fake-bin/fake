@@ -34,33 +34,33 @@ main() {
   fi
 
   case "$line" in
-  "brew list --formula -1") printf '%s\n' "${FAKE_INSTALLED_BREW:-}" ;;
-  "brew list --cask -1") printf '%s\n' "${FAKE_INSTALLED_CASK:-}" ;;
-  "brew tap") printf '%s\n' "${FAKE_TAPS:-}" ;;
-  "brew trust --json v1") printf '{"taps":[]}\n' ;;
-  "mise ls --global --json") printf '%s\n' "${FAKE_INSTALLED_MISE_JSON:-$empty}" ;;
-  "npm ls -g --depth=0 --json") printf '%s\n' "${FAKE_INSTALLED_NPM_JSON:-$empty}" ;;
-  "bun pm ls -g") printf '%s\n' "${FAKE_INSTALLED_BUN:-}" ;;
-  "flatpak list --user --app --columns=application" | \
-    "flatpak list --system --app --columns=application")
-    printf '%s\n' "${FAKE_INSTALLED_FLATPAK:-}"
-    ;;
-  "flatpak remotes --user --columns=name") printf '%s\n' "${FAKE_FLATPAK_REMOTES:-}" ;;
-  "rpm -qa --queryformat "*) printf '%s\n' "${FAKE_INSTALLED_RPM:-}" ;;
-  "sudo -n true")
-    # Like the real thing: `sudo -v` caches a credential that -n then finds.
-    [[ "${FAKE_SUDO_CACHED:-0}" == 1 || -e "${FAKE_TOOL_DIR:?}/.sudo-cached" ]]
-    ;;
-  "sudo -v") : >"${FAKE_TOOL_DIR:?}/.sudo-cached" ;;
-  "curl "*)
-    # The "Homebrew installer": a script that drops brew and mise into the
-    # tool directory nt searches, exactly as the real one lands them off
-    # the shell's PATH.
-    printf 'ln -sf %q %q\nln -sf %q %q\n' \
-      "$self" "${FAKE_TOOL_DIR:?FAKE_TOOL_DIR must name the tool dir}/brew" \
-      "$self" "${FAKE_TOOL_DIR}/mise"
-    ;;
-  *) ;;
+    "brew list --formula -1") printf '%s\n' "${FAKE_INSTALLED_BREW:-}" ;;
+    "brew list --cask -1") printf '%s\n' "${FAKE_INSTALLED_CASK:-}" ;;
+    "brew tap") printf '%s\n' "${FAKE_TAPS:-}" ;;
+    "brew trust --json v1") printf '{"taps":[]}\n' ;;
+    "mise ls --global --json") printf '%s\n' "${FAKE_INSTALLED_MISE_JSON:-$empty}" ;;
+    "npm ls -g --depth=0 --json") printf '%s\n' "${FAKE_INSTALLED_NPM_JSON:-$empty}" ;;
+    "bun pm ls -g") printf '%s\n' "${FAKE_INSTALLED_BUN:-}" ;;
+    "flatpak list --user --app --columns=application" | \
+      "flatpak list --system --app --columns=application")
+      printf '%s\n' "${FAKE_INSTALLED_FLATPAK:-}"
+      ;;
+    "flatpak remotes --user --columns=name") printf '%s\n' "${FAKE_FLATPAK_REMOTES:-}" ;;
+    "rpm -qa --queryformat "*) printf '%s\n' "${FAKE_INSTALLED_RPM:-}" ;;
+    "sudo -n true")
+      # Like the real thing: `sudo -v` caches a credential that -n then finds.
+      [[ "${FAKE_SUDO_CACHED:-0}" == 1 || -e "${FAKE_TOOL_DIR:?}/.sudo-cached" ]]
+      ;;
+    "sudo -v") : >"${FAKE_TOOL_DIR:?}/.sudo-cached" ;;
+    "curl "*)
+      # The "Homebrew installer": a script that drops brew and mise into the
+      # tool directory nt searches, exactly as the real one lands them off
+      # the shell's PATH.
+      printf 'ln -sf %q %q\nln -sf %q %q\n' \
+        "$self" "${FAKE_TOOL_DIR:?FAKE_TOOL_DIR must name the tool dir}/brew" \
+        "$self" "${FAKE_TOOL_DIR}/mise"
+      ;;
+    *) ;;
   esac
 }
 
