@@ -39,19 +39,45 @@ atomic). It never touches an immutable OS tree and never runs as root.
 ## Commands
 
 ```bash
-just setup            # rustup toolchain (rust-toolchain.toml), just, cargo-binstall, cargo-deny, cargo-audit
-just lint             # fmt --check, clippy -D warnings
-just test             # unit + integration
-just security         # cargo audit, cargo deny, plus osv-scanner/gitleaks/trivy if present
-just ci               # lint test security
+just setup            # rustup toolchain (rust-toolchain.toml) + every tool in mise.toml
+just lint             # lint-rust (fmt, clippy), lint-scripts (shellcheck, shfmt, ruff), lint-config (actionlint, zizmor, yamllint, typos)
+just test             # unit + integration (tests/cli.rs, tests/apply.rs)
+just coverage         # the same under cargo-llvm-cov; fails below `coverage_floor` in the justfile
+just security         # cargo audit, cargo deny, osv-scanner, gitleaks, trivy (all from mise.toml)
+just ci               # lint coverage security - what .github/workflows/ci.yml runs
 just e2e-fedora       # real `nt apply` in the devcontainer image (needs podman)
 just e2e-bluefin      # same in a Bluefin image
+just release-assets   # the release archive + sha256 into dist/, as release.yml builds it
 just audit-binaries   # catalog binary names vs this machine
 just clean            # remove target/, completions/, and the e2e/devcontainer images
 ```
 
 Every change must pass `just ci`. A change to the catalog or a manager should
 also pass `just e2e-fedora`.
+
+Tool versions live in `mise.toml` only; CI installs that file with
+`jdx/mise-action` and runs the `just` recipes, so a workflow must never
+carry a command a developer cannot run locally. On the dev machine, brew
+copies of the same tools are shadowed by mise's shims on the justfile's
+`PATH`. Rust stays out of `mise.toml` (rustup owns it; see the comment
+there). `rust-toolchain.toml` carries `llvm-tools-preview` for coverage.
+
+## CI and releases
+
+- `ci.yml` - on push to `main`, every PR, and by call from `release.yml`:
+  `just ci` (lint, coverage with the floor, security) with the coverage
+  summary in the job summary and `lcov.info` as an artifact, then the
+  `e2e` matrix over Fedora and Bluefin. Concurrency cancels superseded runs;
+  every job has a timeout; the repository is private, so minutes are metered.
+- `security.yml` - weekly `just security` against an unchanged `main`.
+- `release.yml` - on a `v*` tag: the whole `ci.yml`, then `just
+  release-assets <tag>` (refuses a tag that does not match `Cargo.toml`) and
+  `gh release create` with generated notes. No caches in the publishing job.
+- `dependabot.yml` - Actions and Cargo weekly; mise tools are bumped by hand.
+
+Actions are pinned by commit SHA with the version in a comment. Resolve a
+SHA with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`; never copy one
+from memory. `zizmor` and `actionlint` run in `just lint-config`.
 
 ## Invariants - do not break these
 
@@ -130,6 +156,9 @@ Stars and last push as of that date. Everything listed passes unless noted.
 | toolbox | containers/toolbox | 3.5k | 2026-08 | OS-native; dnf fallback |
 | powertmux, powerbash | user's own taps | - | - | Not subject to the rules |
 | shellcheck, shfmt | koalaman/shellcheck, mvdan/sh | 40k, 9k | 2026-08 | |
+| jdx/mise-action | jdx/mise-action | 359 | 2026-08 | First-party for mise (same owner); CI only |
+| zizmor | zizmorcore/zizmor | 6.4k | 2026-08 | Dev tool (mise.toml), not in the catalog |
+| cargo-llvm-cov | taiki-e/cargo-llvm-cov | 1.4k | 2026-08 | Dev tool (mise.toml) |
 | starship | starship/starship | 60k | 2026-08 | |
 | oh-my-posh | JanDeDobbeleer/oh-my-posh | 23k | 2026-08 | |
 | trivy, gitleaks, osv-scanner | - | 38k, 29k, 11k | 2026-08 | |

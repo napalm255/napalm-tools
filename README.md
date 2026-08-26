@@ -44,7 +44,8 @@ Flags appear only where they do something:
 
 | Flag | Commands |
 | --- | --- |
-| `--config`, `--output pretty\|plain\|json`, `-v` | apply, status, bundles, config show |
+| `--output pretty\|plain\|json`, `-v` | apply, status, bundles, config show |
+| `--config` | apply, status, bundles, config show, config path, shell-init |
 | `--skip <bundle>`, `--only <bundle>` (repeatable) | apply, status, bundles, config show |
 | `--detail` | status, bundles |
 | `--dry-run`, `--upgrade`, `--strict`, `--no-dotfiles`, `--prompt`, `-q` | apply |
@@ -207,7 +208,13 @@ emoji where the terminal is UTF-8.
 Subprocess output is captured and shown behind a spinner; `-v` streams it
 through untouched and hands the terminal to the command, which is also how
 to answer a prompt one insists on. Homebrew's `==> Caveats` blocks and
-deprecation warnings are collected and shown once at the end.
+deprecation warnings are collected and shown once at the end - except under
+`-v`, where the output streams through exactly as the manager wrote it.
+
+Colour on stderr is decided by stderr's own terminal, so `nt apply 2> run.log`
+writes a log without escape sequences even while stdout is a terminal. The
+dry-run advisory is commentary and goes to stderr too: `nt apply --dry-run
+--output plain > plan.txt` holds only the plan.
 
 A failed step does not stop the run: package steps are independent, so the
 rest still run and every failure is listed at the end with its output. Only
@@ -248,26 +255,53 @@ never hide it.
 ## Development
 
 ```bash
-mise install      # toolchain from mise.toml
-just setup        # cargo-deny, cargo-audit
-just ci           # lint, test, security
+mise install      # every dev tool, pinned in mise.toml (just, linters, scanners, cargo-llvm-cov)
+just setup        # the above plus the rustup toolchain
+just ci           # lint, coverage (runs the tests), security - exactly what CI runs
+just lint         # rustfmt, clippy, shellcheck, shfmt, ruff, actionlint, zizmor, yamllint, typos
+just test         # unit + integration tests, fast
+just coverage     # the tests under cargo-llvm-cov; fails below the floor in the justfile
 just e2e-fedora   # a real `nt apply` inside the devcontainer image
 just e2e-bluefin  # the same inside a Bluefin image
 just clean        # remove everything the repo created: target/, completions/, e2e images
 ```
 
-Rust is pinned by `rust-toolchain.toml` and managed by rustup; `just` and
-`cargo-binstall` come from `mise.toml`. `just setup` installs all of it,
-and the justfile puts `~/.cargo/bin` and mise's shims on `PATH`, so recipes
-work whether or not your shell has activated either.
+Rust is pinned by `rust-toolchain.toml` and managed by rustup; every other
+tool comes from `mise.toml`, and CI installs that same list, so a version
+bump happens in one place. `just setup` installs all of it, and the justfile
+puts `~/.cargo/bin` and mise's shims on `PATH`, so recipes work whether or
+not your shell has activated either.
+
+The tests are three layers. Unit tests sit beside the code. `tests/cli.rs`
+drives the binary with every machine input pinned through `NT_*` overrides.
+`tests/apply.rs` runs a real `nt apply` against fake package managers
+(`tests/fixtures/fake-bin/`) that record their calls and answer listing
+queries from the environment, so the bootstrap, converge, sudo priming and
+exit-code paths run in milliseconds with no network. Coverage is measured
+on every run and gated at the floor in the justfile.
 
 The repository ships a devcontainer (`.devcontainer/`) built from the official
 Fedora image, pinned by digest, with an ordinary user, passwordless sudo and
 mise. The unit and integration tests run inside it; the same image is what
 `just e2e-fedora` runs `nt apply` in, so the tests and the target are one
 thing. `just e2e-bluefin` does the same in a Bluefin image with the atomic
-marker set. CI runs lint, tests, cargo-deny, cargo-audit, and both end-to-end
-jobs.
+marker set. CI (`.github/workflows/ci.yml`) runs `just ci` verbatim and then
+both end-to-end jobs; `security.yml` re-runs the scanners weekly against an
+unchanged `main`.
+
+### Releases
+
+Bump `version` in `Cargo.toml`, commit, then tag and push:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`release.yml` runs the full CI workflow, refuses a tag that does not match
+`Cargo.toml`, builds `nt-v0.2.0-x86_64-unknown-linux-gnu.tar.gz` (the binary,
+shell completions, licence and this README) with a `.sha256` beside it, and
+attaches both to a GitHub Release with notes generated from the commits.
+`just release-assets` builds the same archive locally into `dist/`.
 
 The decision engine is a pure function: `plan::build` takes resolved
 configuration, a platform and a snapshot and returns actions. `--dry-run`
