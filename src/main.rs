@@ -209,7 +209,14 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let assume: &[_] = if dry_run { &becomes_available } else { &[] };
             if !dry_run && !bootstrap.is_empty() {
                 ui.line("Bootstrapping package managers.");
-                execute::run_commands(&bootstrap, ui)?;
+                let report = execute::run_commands(&bootstrap, ui)?;
+                if let Some(step) = report.steps.iter().find(|s| !s.success) {
+                    bail!(
+                        "bootstrap failed at `{}`:\n{}",
+                        step.command,
+                        step.tail.join("\n")
+                    );
+                }
             }
 
             // Phase 2: snapshot and plan.
@@ -232,6 +239,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let json_mode = ui.format() == Format::Json;
 
             // Phase 3: converge, or show what converging would do.
+            let mut failed = false;
             if dry_run {
                 ui.data(&if json_mode {
                     json::to_string(&json::plan_view(&built, &platform, true))
@@ -244,6 +252,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 } else {
                     execute::run(&built, ui)?
                 };
+                failed = report.any_failed();
 
                 if json_mode {
                     // One document carrying both what was planned and what
@@ -267,6 +276,9 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 }
             }
 
+            if failed {
+                return Ok(ExitCode::FAILURE);
+            }
             if resolved.strict && !built.unavailable().is_empty() {
                 return Ok(ExitCode::from(EXIT_UNMET));
             }

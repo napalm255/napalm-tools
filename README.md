@@ -113,7 +113,7 @@ Every bundle is on. The only things that turn one off are the platform, a
 | `elixir` | erlang, elixir |
 | `powershell` | pwsh |
 | `android` | Google's `android` CLI (mise), scrcpy, Android Studio (flatpak, desktop only) |
-| `web` | stylelint, htmlq, pandoc, pa11y |
+| `web` | stylelint, htmlq, pandoc, playwright and its Chromium |
 | `data` | miller, duckdb, qsv, sqlite, sqlite-utils |
 | `aws` | awscli, aws-sam-cli, cfn-lint |
 | `desktop` | Flatpak applications; needs a desktop session |
@@ -131,6 +131,12 @@ else, an executable already on `PATH` counts, whatever put it there: the OS
 image, a vendor script, another manager. That is what keeps `nt` from
 installing a second `jq` beside the one Bluefin ships, or a second Claude
 Code beside the self-updating one.
+
+Browsers: a system Chromium is not available everywhere `nt` runs (no
+`dnf` on atomic hosts; the Flatpak is sandboxed and desktop-only), so the
+`web` bundle installs Playwright from npm and its own Chromium with
+`playwright install chromium` - user-space on every platform, and planned
+only when no complete revision is present.
 
 The `android` bundle installs Google's unified `android` command-line tool,
 which manages the SDK, emulators and projects. SDK components themselves are
@@ -203,6 +209,12 @@ through untouched and hands the terminal to the command, which is also how
 to answer a prompt one insists on. Homebrew's `==> Caveats` blocks and
 deprecation warnings are collected and shown once at the end.
 
+A failed step does not stop the run: package steps are independent, so the
+rest still run and every failure is listed at the end with its output. Only
+a failed bootstrap ends the run, and the dotfiles step is skipped if any
+package step failed, since its scripts may assume the packages exist. The
+exit code is 1 when anything failed.
+
 Steps that may need privileges - `dnf`, Homebrew's installer, a chezmoi run
 script that mentions `sudo` - are known in advance, so `nt` asks for the
 password once, before anything runs and before the spinner starts.
@@ -239,7 +251,13 @@ just setup        # cargo-deny, cargo-audit
 just ci           # lint, test, security
 just e2e-fedora   # a real `nt apply` inside the devcontainer image
 just e2e-bluefin  # the same inside a Bluefin image
+just clean        # remove everything the repo created: target/, completions/, e2e images
 ```
+
+Rust is pinned by `rust-toolchain.toml` and managed by rustup; `just` and
+`cargo-binstall` come from `mise.toml`. `just setup` installs all of it,
+and the justfile puts `~/.cargo/bin` and mise's shims on `PATH`, so recipes
+work whether or not your shell has activated either.
 
 The repository ships a devcontainer (`.devcontainer/`) built from the official
 Fedora image, pinned by digest, with an ordinary user, passwordless sudo and

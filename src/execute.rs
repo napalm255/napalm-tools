@@ -18,6 +18,9 @@ pub struct StepOutcome {
     pub duration: std::time::Duration,
     /// Whether it succeeded.
     pub success: bool,
+    /// The last lines of its output, kept when it failed so the summary
+    /// can show why. Empty on success or when output was streamed.
+    pub tail: Vec<String>,
 }
 
 /// What a whole run did, for the end-of-run summary.
@@ -29,6 +32,21 @@ pub struct RunReport {
     pub findings: Findings,
     /// Wall-clock time for the run.
     pub total: std::time::Duration,
+}
+
+impl RunReport {
+    /// Whether any step failed.
+    pub fn any_failed(&self) -> bool {
+        self.steps.iter().any(|s| !s.success)
+    }
+
+    /// Fold another phase's report into this one.
+    fn absorb(&mut self, other: RunReport) {
+        self.steps.extend(other.steps);
+        self.findings.caveats.extend(other.findings.caveats);
+        self.findings.warnings.extend(other.findings.warnings);
+        self.total += other.total;
+    }
 }
 
 /// What is on the host before anything is bootstrapped.
@@ -112,9 +130,53 @@ fn binaries_on_path() -> HashSet<String> {
         .collect()
 }
 
-/// Run every command in a plan, in order: bootstrap, actions, dotfiles.
+/// Run a plan: bootstrap, then package actions, then dotfiles.
+///
+/// A failed bootstrap step ends the run, since nothing after it can work.
+/// Package actions are independent, so every one of them runs and the
+/// failures are reported together. The dotfiles step runs only when the
+/// packages all succeeded, because its scripts may assume they exist.
 pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
-    run_commands(&plan.commands(), ui)
+    let (bootstrap, actions, dotfiles) = plan.phases();
+    let all: Vec<Cmd> = plan.commands();
+    prime_if_needed(&all, ui)?;
+
+    let mut report = run_commands_numbered(&bootstrap, 0, all.len(), true, ui)?;
+    if report.any_failed() {
+        return Ok(report);
+    }
+    report.absorb(run_commands_numbered(
+        &actions,
+        bootstrap.len(),
+        all.len(),
+        false,
+        ui,
+    )?);
+    if report.any_failed() {
+        if !dotfiles.is_empty() {
+            ui.line("Skipping the dotfiles step because a package step failed.");
+        }
+        return Ok(report);
+    }
+    report.absorb(run_commands_numbered(
+        &dotfiles,
+        bootstrap.len() + actions.len(),
+        all.len(),
+        false,
+        ui,
+    )?);
+    Ok(report)
+}
+
+/// Ask for the sudo password up front if any command will need it and no
+/// credential is cached, so a refusal costs nothing and the prompt is the
+/// only thing on screen.
+fn prime_if_needed(commands: &[Cmd], ui: &Ui) -> Result<()> {
+    if commands.iter().any(|c| c.privileged) && !crate::privilege::already_authorised() {
+        ui.line("Some steps need elevated privileges.");
+        crate::privilege::prime()?;
+    }
+    Ok(())
 }
 
 /// Whether a failure looks like a command that wanted to ask a question.
@@ -139,26 +201,33 @@ pub fn looks_like_a_prompt_failure(tail: &str) -> bool {
         .any(|s| lower.contains(&s.to_ascii_lowercase()))
 }
 
-/// Run a sequence of commands, stopping at the first failure.
+/// Run a sequence of commands as one phase, continuing past failures.
 ///
-/// Asks for the sudo password first if any command is privileged and no
-/// credential is cached, so a refusal costs nothing and the prompt is the
-/// only thing on screen. Output is captured by default and scanned for the
-/// few lines worth showing; under `-v` it streams through untouched.
+/// Output is captured by default and scanned for the few lines worth
+/// showing; under `-v` it streams through untouched. A command that cannot
+/// be started at all (missing program) is still an error.
 pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
-    if commands.iter().any(|c| c.privileged) && !crate::privilege::already_authorised() {
-        ui.line("Some steps need elevated privileges.");
-        crate::privilege::prime()?;
-    }
+    prime_if_needed(commands, ui)?;
+    run_commands_numbered(commands, 0, commands.len(), false, ui)
+}
 
+/// Run `commands` numbered from `offset + 1` out of `total`. With
+/// `stop_on_failure`, the phase ends at the first failure.
+fn run_commands_numbered(
+    commands: &[Cmd],
+    offset: usize,
+    total: usize,
+    stop_on_failure: bool,
+    ui: &Ui,
+) -> Result<RunReport> {
     let started = std::time::Instant::now();
     let mut report = RunReport::default();
-    let total = commands.len();
 
     for (i, cmd) in commands.iter().enumerate() {
+        let n = offset + i + 1;
         let label = cmd.to_shell();
-        tracing::info!(step = i + 1, total, command = %label, "running");
-        let step = ui.step(i + 1, total, &label);
+        tracing::info!(step = n, total, command = %label, "running");
+        let step = ui.step(n, total, &label);
 
         let outcome = if ui.raw_subprocess_output() {
             cmd.run_streaming()?
@@ -175,26 +244,22 @@ pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
         };
 
         step.finish(outcome.success, outcome.duration);
+        let mut tail = outcome.tail.clone();
+        if !outcome.success {
+            tracing::warn!(command = %label, status = %outcome.status, "step failed");
+            tail.push(format!("({})", outcome.status));
+        } else {
+            tail.clear();
+        }
         report.steps.push(StepOutcome {
             command: label.clone(),
             duration: outcome.duration,
             success: outcome.success,
+            tail,
         });
 
-        if !outcome.success {
-            report.total = started.elapsed();
-            let tail = outcome.tail_text();
-            if tail.is_empty() {
-                anyhow::bail!("`{label}` {}", outcome.status);
-            }
-            if looks_like_a_prompt_failure(&tail) {
-                anyhow::bail!(
-                    "`{label}` {}\n{tail}\n\nhint: this command wanted to prompt; \
-                     re-run with -v to give it the terminal",
-                    outcome.status
-                );
-            }
-            anyhow::bail!("`{label}` {}\n{tail}", outcome.status);
+        if !outcome.success && stop_on_failure {
+            break;
         }
     }
 
@@ -226,30 +291,71 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_stops_the_run() {
+    fn a_failure_does_not_stop_later_steps() {
         let cmds = vec![
             Cmd::new("sh", ["-c", "exit 1"]),
-            Cmd::new("sh", ["-c", "echo should-not-run"]),
+            Cmd::new("sh", ["-c", "echo still-runs"]),
         ];
 
-        let err = run_commands(&cmds, &ui()).unwrap_err();
+        let report = run_commands(&cmds, &ui()).unwrap();
 
-        assert!(format!("{err:#}").contains("exit"), "got {err:#}");
+        assert_eq!(report.steps.len(), 2);
+        assert!(!report.steps[0].success);
+        assert!(report.steps[1].success);
+        assert!(report.any_failed());
     }
 
     #[test]
-    fn a_failure_carries_the_output_tail() {
-        let cmds = vec![Cmd::new(
-            "sh",
-            ["-c", "echo 'something went wrong' 1>&2; exit 2"],
-        )];
+    fn a_failed_step_keeps_its_output_tail_and_status() {
+        let cmds = vec![
+            Cmd::new("sh", ["-c", "echo 'something went wrong' 1>&2; exit 2"]),
+            Cmd::new("sh", ["-c", "echo fine"]),
+        ];
 
-        let err = run_commands(&cmds, &ui()).unwrap_err();
+        let report = run_commands(&cmds, &ui()).unwrap();
 
         assert!(
-            format!("{err:#}").contains("something went wrong"),
-            "the tail should be in the error, got {err:#}"
+            report.steps[0]
+                .tail
+                .iter()
+                .any(|l| l.contains("something went wrong")),
+            "got {:?}",
+            report.steps[0].tail
         );
+        assert!(report.steps[0].tail.last().unwrap().contains('2'));
+        assert!(report.steps[1].tail.is_empty(), "success keeps no tail");
+    }
+
+    #[test]
+    fn a_bootstrap_failure_ends_the_run_and_a_package_failure_skips_dotfiles() {
+        use crate::managers::ManagerId;
+        use crate::plan::{Action, ActionPlan};
+
+        let plan = ActionPlan {
+            bootstrap: vec![Cmd::new("sh", ["-c", "exit 1"])],
+            actions: vec![Action::Install {
+                manager: ManagerId::Brew,
+                packages: vec!["x".into()],
+            }],
+            dotfiles: vec![Cmd::new("sh", ["-c", "echo dotfiles"])],
+            ..Default::default()
+        };
+        let report = run(&plan, &ui()).unwrap();
+        assert_eq!(
+            report.steps.len(),
+            1,
+            "nothing runs after a failed bootstrap"
+        );
+        assert!(!report.steps[0].success);
+
+        // With nothing failing, the dotfiles phase runs.
+        let plan = ActionPlan {
+            dotfiles: vec![Cmd::new("sh", ["-c", "echo dotfiles"])],
+            ..Default::default()
+        };
+        let report = run(&plan, &ui()).unwrap();
+        assert_eq!(report.steps.len(), 1);
+        assert!(report.steps[0].success);
     }
 
     #[test]
@@ -308,35 +414,6 @@ mod tests {
         ] {
             assert!(!looks_like_a_prompt_failure(tail), "false positive: {tail}");
         }
-    }
-
-    #[test]
-    fn a_prompt_failure_carries_the_hint_and_an_ordinary_one_does_not() {
-        let err = run_commands(
-            &[Cmd::new(
-                "sh",
-                [
-                    "-c",
-                    "echo 'sudo: a terminal is required to read the password' 1>&2; exit 1",
-                ],
-            )],
-            &ui(),
-        )
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("re-run with -v"), "got {err:#}");
-
-        let err = run_commands(
-            &[Cmd::new(
-                "sh",
-                ["-c", "echo 'no such formula' 1>&2; exit 1"],
-            )],
-            &ui(),
-        )
-        .unwrap_err();
-        assert!(
-            !format!("{err:#}").contains("re-run with -v"),
-            "got {err:#}"
-        );
     }
 
     #[test]

@@ -288,3 +288,24 @@ Run on 2026-08-25 on the development machine (Bluefin 44).
    container user owns the mounted checkout.
 6. **trivy's `DS-0026` (HEALTHCHECK) is ignored** for the devcontainer image
    via `.trivyignore`; it is not a service.
+
+## Follow-up, 2026-08-26
+
+- `just clean` (`scripts/clean.sh`) removes what the repository created -
+  `target/`, `completions/`, the devcontainer image and the digest-pinned
+  e2e images, read from the files that name them - and nothing else.
+- Step lines lead with the status (`✓ [3/4] brew install …`), so a long
+  command cannot push the outcome off screen; live spinner text is cut to
+  the terminal width, which stops stale frames being left behind when a
+  wrapped line is cleared.
+- A failed package step no longer aborts the run: every independent step
+  runs, failures are listed at the end with their output, and the exit code
+  is 1. A failed bootstrap still ends the run; dotfiles are skipped after a
+  package failure.
+- `pa11y` was dropped: puppeteer downloads its own Chrome at install time
+  and could not repair a broken cache. Playwright (first-party Microsoft)
+  takes its place, with a `playwright` manager that installs Chromium in
+  user space only when no complete revision exists.
+- The justfile puts mise's shims on `PATH` and `just setup` runs
+  `mise install`, after `just build` failed in a shell without mise
+  activated.

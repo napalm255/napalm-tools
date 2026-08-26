@@ -1,7 +1,8 @@
-# Toolchain for working on napalm-tools. `mise install` sets it up; the
-# devcontainer does that on create. `just` remains the task runner.
+# Dev tools for working on napalm-tools. `just setup` installs them; the
+# devcontainer does that on create. Rust itself is pinned by
+# rust-toolchain.toml and managed by rustup, so it is deliberately absent
+# here: two managers for one toolchain leave rustup with half a toolchain.
 [tools]
-rust = "1.97.1"
 just = "1.55.1"
 cargo-binstall = "1.22.0"
 

@@ -215,6 +215,17 @@ impl ActionPlan {
             .collect()
     }
 
+    /// The plan's commands by phase: bootstrap, package actions, dotfiles.
+    /// Bootstrap failure aborts everything after it; a package failure
+    /// skips the dotfiles, whose scripts may assume the packages exist.
+    pub fn phases(&self) -> (Vec<Cmd>, Vec<Cmd>, Vec<Cmd>) {
+        (
+            self.bootstrap.clone(),
+            self.actions.iter().map(Action::to_cmd).collect(),
+            self.dotfiles.clone(),
+        )
+    }
+
     /// Every command the plan would run, in order.
     pub fn commands(&self) -> Vec<Cmd> {
         self.bootstrap
@@ -848,6 +859,33 @@ mod tests {
             "got {:?}",
             plan.actions
         );
+    }
+
+    #[test]
+    fn the_web_bundle_installs_chromium_through_playwright_when_absent() {
+        let plan = build(
+            &only(&["web"]),
+            &PLAIN,
+            &snapshot(&[ManagerId::Brew, ManagerId::Npm, ManagerId::Playwright]),
+        );
+
+        assert_eq!(
+            installs_for(&plan, ManagerId::Playwright).unwrap(),
+            vec!["chromium".to_string()]
+        );
+        assert!(
+            installs_for(&plan, ManagerId::Npm)
+                .unwrap()
+                .contains(&"playwright".to_string())
+        );
+
+        let mut snap = snapshot(&[ManagerId::Brew, ManagerId::Npm, ManagerId::Playwright]);
+        snap.installed.insert(
+            ManagerId::Playwright,
+            HashSet::from(["chromium".to_string()]),
+        );
+        let plan = build(&only(&["web"]), &PLAIN, &snap);
+        assert!(installs_for(&plan, ManagerId::Playwright).is_none());
     }
 
     #[test]

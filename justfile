@@ -1,11 +1,19 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# Rust comes from rustup (rust-toolchain.toml); just and cargo-binstall from
+# mise. Put both on PATH so every recipe works in a shell that has activated
+# neither, once `just setup` has run.
+export PATH := env("HOME") / ".cargo/bin" + ":" + env("HOME") / ".local/share/mise/shims" + ":" + env("PATH")
+
 # List available recipes
 default:
     @just --list
 
-# Install the dev tools this project expects (toolchain comes from mise.toml)
+# Install the toolchain (mise.toml) and the dev tools this project expects
 setup:
+    mise trust --quiet
+    mise install --yes
+    rustup show active-toolchain || rustup toolchain install
     cargo binstall -y --locked cargo-deny cargo-audit
     @echo "Optional scanners (brew install): osv-scanner gitleaks trivy"
 
@@ -63,9 +71,9 @@ build:
 run *args:
     cargo run -- {{ args }}
 
-# Remove build output
-clean:
-    cargo clean
+# Remove everything this repo created: build output, completions, e2e/devcontainer images
+clean *args:
+    ./scripts/clean.sh {{ args }}
 
 # Check catalog binary names against what is actually installed here
 audit-binaries: build

@@ -30,6 +30,8 @@
 //! - `cpanminus` - 782 stars.
 //! - `dive` - last push December 2025.
 //! - `pipenv` - removed; `uv` covers it.
+//! - `pa11y` - removed; it pulls puppeteer, which downloads its own Chrome
+//!   at install time. Playwright covers the job with a shared browser.
 
 use super::{Bundle, Pkg, Provider, Selector};
 use crate::managers::ManagerId;
@@ -339,7 +341,14 @@ static WEB: &[Pkg] = &[
     brew_pkg!("stylelint"),
     brew_pkg!("htmlq"),
     brew_pkg!("pandoc"),
-    npm_pkg!("pa11y", pkg = "pa11y", bin = "pa11y"),
+    // Browser automation and accessibility checks. The CLI comes from npm;
+    // its Chromium is a package of its own so a fresh machine gets both.
+    npm_pkg!("playwright", pkg = "playwright", bin = "playwright"),
+    Pkg {
+        name: "chromium",
+        binary: None,
+        providers: &[Provider::new(ManagerId::Playwright, "chromium")],
+    },
 ];
 
 static DATA: &[Pkg] = &[
@@ -449,7 +458,7 @@ pub static BUNDLES: &[Bundle] = &[
         "Android command-line tools, scrcpy and Android Studio",
         ANDROID,
     ),
-    bundle("web", "HTML, CSS and accessibility tooling", WEB),
+    bundle("web", "HTML, CSS, Playwright and its Chromium", WEB),
     bundle("data", "SQLite, CSV and columnar data tooling", DATA),
     bundle("aws", "AWS CLI, serverless and CloudFormation tooling", AWS),
     Bundle {
@@ -584,8 +593,10 @@ mod tests {
         for b in BUNDLES {
             for p in b.packages.iter().filter(|p| p.binary.is_none()) {
                 let ok = p.providers.iter().all(|pr| {
-                    matches!(pr.manager, ManagerId::Flatpak | ManagerId::Mise)
-                        || p.name.starts_with("font-")
+                    matches!(
+                        pr.manager,
+                        ManagerId::Flatpak | ManagerId::Mise | ManagerId::Playwright
+                    ) || p.name.starts_with("font-")
                         || p.name == "powerbash"
                 });
                 assert!(ok, "{}/{} declares no binary", b.name, p.name);

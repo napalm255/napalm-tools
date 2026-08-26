@@ -189,6 +189,8 @@ pub struct StepView {
     pub success: bool,
     /// Seconds it took.
     pub duration_secs: f64,
+    /// The last lines of output, when it failed.
+    pub tail: Vec<String>,
 }
 
 /// A caveat block.
@@ -356,6 +358,7 @@ pub fn report_view(report: &RunReport) -> ReportView {
                 command: s.command.clone(),
                 success: s.success,
                 duration_secs: s.duration.as_secs_f64(),
+                tail: s.tail.clone(),
             })
             .collect(),
         duration_secs: report.total.as_secs_f64(),

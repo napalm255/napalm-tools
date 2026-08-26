@@ -87,6 +87,10 @@ pub struct Ui {
     quiet: bool,
     sink: Sink,
     progress: progress::Progress,
+    /// Columns available for a live spinner line. A message wider than
+    /// this wraps, and clearing the spinner then leaves stale frames on the
+    /// rows above.
+    width: usize,
 }
 
 impl Ui {
@@ -104,6 +108,7 @@ impl Ui {
             quiet,
             sink: Sink::Std,
             progress: progress::Progress::new(live),
+            width: console::Term::stderr().size().1 as usize,
         }
     }
 
@@ -123,6 +128,7 @@ impl Ui {
             quiet,
             sink: Sink::Capture(Arc::clone(&buf)),
             progress: progress::Progress::disabled(),
+            width: 80,
         };
         (ui, buf)
     }
@@ -183,6 +189,12 @@ impl Ui {
         self.write_err(&format!("{} {msg}\n", self.theme.bad.apply_to("error:")));
     }
 
+    /// Fit a live message into the terminal so the spinner never wraps.
+    /// The spinner's own prefix (`  ⠋ `) takes four columns.
+    pub fn live(&self, message: &str) -> String {
+        truncate(message, self.width.saturating_sub(5).max(10))
+    }
+
     /// Begin an open-ended activity with no step number - checking, probing,
     /// anything whose duration is unknown and whose only news is that it is
     /// still going.
@@ -190,7 +202,7 @@ impl Ui {
         let bar = if self.silent_steps() {
             None
         } else {
-            self.progress.spinner(label.to_string())
+            self.progress.spinner(self.live(label))
         };
         Probe {
             ui: self,
@@ -206,12 +218,18 @@ impl Ui {
         let bar = if self.silent_steps() {
             None
         } else {
-            self.progress.spinner(format!("[{index}/{total}] {label}"))
+            self.progress
+                .spinner(self.live(&format!("[{index}/{total}] {label}")))
         };
         // Without a spinner there is no live region, so announce the start;
         // with one, the spinner already says what is running.
         if bar.is_none() && !self.silent_steps() {
-            self.write_err(&format!("  [{index}/{total}] {label}\n"));
+            self.write_err(&format!(
+                "  {} {} {}\n",
+                self.theme.dim.apply_to("·"),
+                self.theme.dim.apply_to(format!("[{index}/{total}]")),
+                self.theme.name.apply_to(&label)
+            ));
         }
         Step {
             ui: self,
@@ -253,6 +271,25 @@ impl Ui {
                 self.write_err(&format!("\n{} {}\n", t.cross(), t.bad.apply_to(line)));
             } else {
                 self.write_err(&format!("\n{} {}\n", t.tick(), t.good.apply_to(line)));
+            }
+        }
+
+        for step in report.steps.iter().filter(|s| !s.success) {
+            self.write_err(&format!(
+                "\n{} {}\n",
+                t.cross(),
+                t.bad.apply_to(format!("failed: {}", step.command))
+            ));
+            for line in &step.tail {
+                self.write_err(&format!("  {line}\n"));
+            }
+            if crate::execute::looks_like_a_prompt_failure(&step.tail.join("\n")) {
+                self.write_err(&format!(
+                    "  {}\n",
+                    t.dim.apply_to(
+                        "hint: this command wanted to prompt; re-run with -v to give it the terminal"
+                    )
+                ));
             }
         }
 
@@ -330,7 +367,7 @@ impl Probe<'_> {
     /// Note what the activity is currently doing.
     pub fn detail(&self, what: &str) {
         if let Some(bar) = &self.bar {
-            bar.set_message(format!("{}  {}", self.label, what));
+            bar.set_message(self.ui.live(&format!("{}  {}", self.label, what)));
         }
     }
 
@@ -374,13 +411,13 @@ impl Step<'_> {
         if line.is_empty() {
             return;
         }
-        bar.set_message(format!(
+        bar.set_message(self.ui.live(&format!(
             "[{}/{}] {}  {}",
             self.index,
             self.total,
             self.label,
             truncate(line, 60)
-        ));
+        )));
     }
 
     /// Close the step.
@@ -392,15 +429,17 @@ impl Step<'_> {
             return;
         }
 
+        // Status first: a long command must never push the outcome out of
+        // sight off the right edge.
         let theme = self.ui.theme();
         let mark = if success { theme.tick() } else { theme.cross() };
         let text = format!(
             "  {} {} {} {}\n",
+            mark,
             theme
                 .dim
                 .apply_to(format!("[{}/{}]", self.index, self.total)),
             theme.name.apply_to(&self.label),
-            mark,
             theme.dim.apply_to(format!("({})", human_duration(elapsed)))
         );
 
@@ -494,6 +533,58 @@ mod tests {
         assert!(e.contains("[1/3]"), "got {e:?}");
         assert!(e.contains("brew install nmap"), "got {e:?}");
         assert!(e.contains("1.2s"), "got {e:?}");
+        let last = e.lines().last().unwrap();
+        assert!(
+            last.trim_start().starts_with("ok [1/3]"),
+            "the status must lead the line: {last:?}"
+        );
+    }
+
+    #[test]
+    fn a_live_message_is_cut_to_the_terminal_width() {
+        let (ui, _) = captured(Format::Plain);
+        let long = "x".repeat(500);
+
+        let shown = ui.live(&long);
+
+        assert!(
+            shown.chars().count() <= 75,
+            "got {} chars",
+            shown.chars().count()
+        );
+        assert!(shown.ends_with('\u{2026}'));
+        assert_eq!(ui.live("short"), "short");
+    }
+
+    #[test]
+    fn the_summary_lists_each_failed_step_with_its_output() {
+        let (ui, buf) = captured(Format::Plain);
+        let report = RunReport {
+            steps: vec![
+                crate::execute::StepOutcome {
+                    command: "npm install -g pa11y".into(),
+                    duration: Duration::from_secs(4),
+                    success: false,
+                    tail: vec!["npm error code 1".into()],
+                },
+                crate::execute::StepOutcome {
+                    command: "mise use --global go@latest".into(),
+                    duration: Duration::from_secs(1),
+                    success: true,
+                    tail: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        ui.summary(&report);
+
+        let e = err(&buf);
+        assert!(e.contains("2 steps"), "got {e}");
+        assert!(e.contains("1 failed"), "got {e}");
+        assert!(e.contains("failed: npm install -g pa11y"), "got {e}");
+        assert!(e.contains("npm error code 1"), "got {e}");
+        assert!(!e.contains("failed: mise"), "got {e}");
     }
 
     #[test]
@@ -587,6 +678,7 @@ mod tests {
                 command: "brew install broken".into(),
                 duration: Duration::from_secs(1),
                 success: false,
+                tail: Vec::new(),
             }],
             ..Default::default()
         };

@@ -20,7 +20,7 @@ atomic). It never touches an immutable OS tree and never runs as root.
 | --- | --- |
 | `src/bundles/catalog.rs` | **The catalog.** Data only. Every package, its providers in preference order, and its binary |
 | `src/bundles/mod.rs` | `Bundle`, `Pkg`, `Provider`, `Selector` types |
-| `src/managers/` | One module per package manager: `brew`, `brew_cask`, `npm`, `bun`, `flatpak`, `mise`, `dnf`. `mod.rs` holds `Cmd` (subprocess handling) and the `Manager` trait |
+| `src/managers/` | One module per package manager: `brew`, `brew_cask`, `npm`, `bun`, `flatpak`, `mise`, `playwright` (its Chromium), `dnf`. `mod.rs` holds `Cmd` (subprocess handling) and the `Manager` trait |
 | `src/platform.rs` | Detection: `fedora_family`, `atomic`, `wsl`, `container`, `graphical` |
 | `src/config/` | `config.toml` types, hostname globs, layering into `Resolved`. Validation of user input lives in `merge.rs` |
 | `src/plan.rs` | **Pure.** Snapshot + config + platform -> `ActionPlan`. Also the bootstrap decision |
@@ -39,8 +39,7 @@ atomic). It never touches an immutable OS tree and never runs as root.
 ## Commands
 
 ```bash
-mise install          # toolchain (rust, just, cargo-binstall) from mise.toml
-just setup            # cargo-deny, cargo-audit
+just setup            # rustup toolchain (rust-toolchain.toml), just, cargo-binstall, cargo-deny, cargo-audit
 just lint             # fmt --check, clippy -D warnings
 just test             # unit + integration
 just security         # cargo audit, cargo deny, plus osv-scanner/gitleaks/trivy if present
@@ -48,6 +47,7 @@ just ci               # lint test security
 just e2e-fedora       # real `nt apply` in the devcontainer image (needs podman)
 just e2e-bluefin      # same in a Bluefin image
 just audit-binaries   # catalog binary names vs this machine
+just clean            # remove target/, completions/, and the e2e/devcontainer images
 ```
 
 Every change must pass `just ci`. A change to the catalog or a manager should
@@ -72,7 +72,8 @@ also pass `just e2e-fedora`.
    error. Bundle and prompt names are validated by clap.
 7. **User-supplied names are validated at the boundary** (`config/merge.rs`):
    no flag-shaped `[extra]` entries, no unknown bundles or managers.
-8. **`apply` refuses root.**
+8. **`apply` refuses root.** A failed package step does not stop the run;
+   failures are summarised at the end and exit 1. A failed bootstrap does.
 9. **JSON keys are an interface.** Tests pin them. Add keys; do not rename.
 10. **No `unwrap`/`expect` on input paths.** `expect` only where clap or a
     catalog invariant makes failure impossible, with the reason in the message.
@@ -155,7 +156,8 @@ Stars and last push as of that date. Everything listed passes unless noted.
 | android-cli | Google (dl.google.com/android/cli) | - | - | First-party: the unified `android` CLI. Via mise |
 | scrcpy | Genymobile/scrcpy | 148k | 2026-08 | |
 | Android Studio | Google, Flathub | - | - | First-party. Flatpak, desktop only |
-| stylelint, htmlq, pandoc, pa11y | - | 12k, 7.6k, 46k, 4.5k | 2026-08, 2026-05, 2026-08, 2026-08 | |
+| stylelint, htmlq, pandoc | - | 12k, 7.6k, 46k | 2026-08, 2026-05, 2026-08 | |
+| playwright | microsoft/playwright | 70k+ | 2026-08 | First-party Microsoft; supplies the shared Chromium |
 | miller, duckdb, qsv, sqlite-utils | - | 10k, 41k, 3.8k, 2.2k | 2026-08 | |
 | awscli, aws-sam-cli, cfn-lint | - | 17k, 6.7k, 2.6k | 2026-08 | |
 | remmina | FreeRDP/Remmina | 2.5k | 2026-02 | GitHub is a mirror; GitLab upstream is active |
@@ -163,7 +165,8 @@ Stars and last push as of that date. Everything listed passes unless noted.
 | Nerd Fonts | ryanoasis/nerd-fonts | 64k | 2026-08 | |
 
 Rejected: `markdownlint-cli2` (907 stars), `cpanminus` (782), `dive` (last
-push 2025-12), `pipenv` (replaced by `uv`), plus the older rejections listed
+push 2025-12), `pipenv` (replaced by `uv`), `pa11y` (puppeteer downloads
+its own Chrome at install time; Playwright covers it), plus the older rejections listed
 in `catalog.rs`.
 
 ## Environment overrides
