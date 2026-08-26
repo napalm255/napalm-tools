@@ -563,3 +563,81 @@ fn version_refuses_flags_that_could_only_contradict_it() {
             .failure();
     }
 }
+
+// --- privileges -------------------------------------------------------------
+
+#[test]
+fn dnf_actions_escalate_privileges() {
+    // Without sudo the command cannot succeed: dnf refuses to run as a
+    // normal user, so the old unprivileged form was dead on arrival.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    on_traditional(&cfg)
+        .args(["apply", "--dry-run", "--desktop"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("sudo dnf install -y xdotool"));
+}
+
+#[test]
+fn privileged_steps_are_visible_before_the_run_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_traditional(&cfg)
+        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v = stdout_json(&out);
+    let needs_password = v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["privileged"] == true);
+
+    assert!(
+        needs_password,
+        "a dnf run should declare that it needs a password"
+    );
+}
+
+#[test]
+fn no_privileged_action_is_planned_on_an_atomic_host() {
+    // dnf is refused there entirely, so nothing should ask for a password.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v = stdout_json(&out);
+    for action in v["actions"].as_array().unwrap() {
+        assert_eq!(
+            action["privileged"], false,
+            "unexpected privileged action: {action}"
+        );
+    }
+}
+
+#[test]
+fn a_dry_run_never_asks_for_a_password() {
+    // Nothing executes, so nothing should prompt or prime.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    on_traditional(&cfg)
+        .args(["apply", "--dry-run", "--desktop"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("privileges").not());
+}

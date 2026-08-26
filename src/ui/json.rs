@@ -23,6 +23,8 @@ pub struct ActionView {
     pub packages: Vec<String>,
     /// The command as it would be typed.
     pub command: String,
+    /// Whether this step may need elevated privileges, and so a password.
+    pub privileged: bool,
 }
 
 /// A package that cannot be provisioned here.
@@ -152,11 +154,13 @@ pub fn plan_view(plan: &ActionPlan, dry_run: bool) -> PlanView {
                 Action::Install { packages, .. } => ("install", packages.clone()),
                 Action::Upgrade { packages, .. } => ("upgrade", packages.clone()),
             };
+            let cmd = a.to_cmd();
             ActionView {
                 kind,
                 manager: Some(a.manager().as_str().to_string()),
                 packages,
-                command: a.to_cmd().to_shell(),
+                command: cmd.to_shell(),
+                privileged: cmd.privileged,
             }
         })
         .collect();
@@ -167,6 +171,7 @@ pub fn plan_view(plan: &ActionPlan, dry_run: bool) -> PlanView {
         manager: None,
         packages: Vec::new(),
         command: cmd.to_shell(),
+        privileged: cmd.privileged,
     }));
 
     PlanView {
@@ -425,6 +430,28 @@ mod tests {
         assert_eq!(
             keys(&json),
             vec!["caveats", "duration_secs", "steps", "warnings"]
+        );
+    }
+
+    #[test]
+    fn actions_report_whether_they_need_a_password() {
+        // So a consumer can see what a run will ask for before starting it.
+        let plan = ActionPlan {
+            actions: vec![Action::Install {
+                manager: ManagerId::Dnf,
+                packages: vec!["xdotool".into()],
+            }],
+            dotfiles: vec![crate::managers::Cmd::new("chezmoi", ["apply"])],
+            ..Default::default()
+        };
+
+        let v: serde_json::Value =
+            serde_json::from_str(&to_string(&plan_view(&plan, true))).unwrap();
+
+        assert_eq!(v["actions"][0]["privileged"], true, "dnf needs sudo");
+        assert_eq!(
+            v["actions"][1]["privileged"], false,
+            "this chezmoi step does not"
         );
     }
 }
