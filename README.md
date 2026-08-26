@@ -34,6 +34,52 @@ nt apply                # make it so
 `nt apply` takes `--dry-run`, `--upgrade`, `--strict` and `--no-dotfiles`, plus
 a generated `--<bundle>` / `--no-<bundle>` pair for every bundle in the catalog.
 
+## Output
+
+Subprocess output is captured, not inherited. A run shows what step it is on
+and how long each took, and the managers' several hundred lines of chatter stay
+out of the way unless something in them matters.
+
+```
+  [1/1] brew install nmap inetutils ok (7.1s)
+
+1 step in 7.1s
+
+warnings:
+  Warning: The following taps are not trusted:
+    someone/tap
+```
+
+Two rules govern where things go:
+
+- **stdout is the answer** - the rendered plan, the notes, any JSON, nothing
+  else. `nt bundles --output json > file` produces a file that parses.
+- **stderr is everything else** - progress, warnings, caveats, timings, errors.
+
+`--output` selects `pretty`, `plain` or `json`; without it, `pretty` when
+stderr is a terminal and `plain` otherwise, so pipes and CI logs stay readable.
+
+| flag | subprocess output | logging |
+| --- | --- | --- |
+| *(none)* | captured, hidden behind a spinner | warnings |
+| `-q` | captured, hidden, no progress | errors only |
+| `-v` | raw passthrough, spinner off | info |
+| `-vv` | raw passthrough | debug |
+
+Homebrew's `==> Caveats` blocks and deprecation warnings are collected while
+scrolling past and shown once at the end, where they can be read.
+
+### Machine-readable
+
+`nt` holds its catalog to a standard - machine-readable output, non-interactive,
+meaningful exit codes - so it meets it too.
+
+```bash
+nt bundles --output json | jq -r '.bundles[] | select(.enabled) | .name'
+nt apply --dry-run --output json | jq -r '.actions[].command'
+nt apply --dry-run --output json | jq '.unavailable[] | {package, reason}'
+```
+
 ## How it decides
 
 Configuration is layered, lowest to highest:
