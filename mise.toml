@@ -1,11 +1,32 @@
-# Dev tools for working on napalm-tools. `just setup` installs them; the
-# devcontainer does that on create. Rust itself is pinned by
-# rust-toolchain.toml and managed by rustup, so it is deliberately absent
-# here: two managers for one toolchain leave rustup with half a toolchain.
+# Every development tool this repository expects, pinned once. CI installs
+# exactly this list (jdx/mise-action) and runs the same `just` recipes, so
+# local and CI can never disagree about a tool's version.
+#
+# Rust is deliberately absent: it is pinned by rust-toolchain.toml and owned
+# by rustup. Two managers for one toolchain leave rustup with half a
+# toolchain. Add the llvm-tools component there, not here.
 [tools]
 just = "1.55.1"
 cargo-binstall = "1.22.0"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-llvm-cov" = "0.9.0"
+shellcheck = "0.11.0"
+shfmt = "3.13.1"
+actionlint = "1.7.12"
+zizmor = "1.29.0"
+"pipx:yamllint" = "1.38.0"
+typos = "1.49.0"
+ruff = "0.16.4"
+osv-scanner = "2.5.1"
+gitleaks = "8.30.1"
+trivy = "0.74.0"
+
+[settings]
+# The cargo backend installs prebuilt binaries through cargo-binstall
+# (pinned above) rather than compiling each tool.
+cargo.binstall = true
+pipx.uvx = true
 
 [env]
-# Bottles, not builds, in the devcontainer and in end-to-end runs.
 HOMEBREW_NO_AUTO_UPDATE = "1"

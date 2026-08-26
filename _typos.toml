@@ -1,0 +1,8 @@
+# Spelling check configuration for `typos`.
+[default.extend-words]
+# A crate and a CLI, not misspellings.
+ratatui = "ratatui"
+hass = "hass"
+
+[files]
+extend-exclude = ["Cargo.lock", "target/", "tests/fixtures/"]
