@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# A stand-in for every package manager nt drives, for the hermetic `apply`
+# tests. It records each invocation and answers the listing queries nt issues
+# with canned output; every other command succeeds silently. Steered by:
+#
+#   FAKE_LOG                 file every call is appended to: "<name> <args>"
+#   FAKE_FAIL                substring; a call whose line contains it exits 1
+#   FAKE_SUDO_CACHED         1 makes `sudo -n true` succeed (credential cached)
+#   FAKE_TOOL_DIR            where the fake Homebrew installer puts brew and mise;
+#                            also where `sudo -v` records that it has cached
+#   FAKE_INSTALLED_BREW      newline-separated formulae `brew list` reports
+#   FAKE_INSTALLED_CASK      likewise for casks
+#   FAKE_INSTALLED_BUN       likewise for bun globals
+#   FAKE_INSTALLED_FLATPAK   likewise for flatpak applications
+#   FAKE_INSTALLED_RPM       likewise for rpm packages
+#   FAKE_INSTALLED_MISE_JSON JSON `mise ls --global --json` prints
+#   FAKE_INSTALLED_NPM_JSON  JSON `npm ls -g --json` prints
+#   FAKE_TAPS                newline-separated taps `brew tap` reports
+#   FAKE_FLATPAK_REMOTES     newline-separated user remotes
+#
+# Each manager name is a symlink to this file; the name decides the role.
+set -euo pipefail
+
+main() {
+  local self name line empty='{}'
+  self="$(readlink -f "$0")"
+  name="$(basename "$0")"
+  line="$name $*"
+  printf '%s\n' "${line//$'\n'/\\n}" >>"${FAKE_LOG:?FAKE_LOG must name the call log}"
+
+  if [[ -n "${FAKE_FAIL:-}" && "$line" == *"${FAKE_FAIL}"* ]]; then
+    echo "fake ${name}: simulated failure of: ${line}" >&2
+    exit 1
+  fi
+
+  case "$line" in
+  "brew list --formula -1") printf '%s\n' "${FAKE_INSTALLED_BREW:-}" ;;
+  "brew list --cask -1") printf '%s\n' "${FAKE_INSTALLED_CASK:-}" ;;
+  "brew tap") printf '%s\n' "${FAKE_TAPS:-}" ;;
+  "brew trust --json v1") printf '{"taps":[]}\n' ;;
+  "mise ls --global --json") printf '%s\n' "${FAKE_INSTALLED_MISE_JSON:-$empty}" ;;
+  "npm ls -g --depth=0 --json") printf '%s\n' "${FAKE_INSTALLED_NPM_JSON:-$empty}" ;;
+  "bun pm ls -g") printf '%s\n' "${FAKE_INSTALLED_BUN:-}" ;;
+  "flatpak list --user --app --columns=application" | \
+    "flatpak list --system --app --columns=application")
+    printf '%s\n' "${FAKE_INSTALLED_FLATPAK:-}"
+    ;;
+  "flatpak remotes --user --columns=name") printf '%s\n' "${FAKE_FLATPAK_REMOTES:-}" ;;
+  "rpm -qa --queryformat "*) printf '%s\n' "${FAKE_INSTALLED_RPM:-}" ;;
+  "sudo -n true")
+    # Like the real thing: `sudo -v` caches a credential that -n then finds.
+    [[ "${FAKE_SUDO_CACHED:-0}" == 1 || -e "${FAKE_TOOL_DIR:?}/.sudo-cached" ]]
+    ;;
+  "sudo -v") : >"${FAKE_TOOL_DIR:?}/.sudo-cached" ;;
+  "curl "*)
+    # The "Homebrew installer": a script that drops brew and mise into the
+    # tool directory nt searches, exactly as the real one lands them off
+    # the shell's PATH.
+    printf 'ln -sf %q %q\nln -sf %q %q\n' \
+      "$self" "${FAKE_TOOL_DIR:?FAKE_TOOL_DIR must name the tool dir}/brew" \
+      "$self" "${FAKE_TOOL_DIR}/mise"
+    ;;
+  *) ;;
+  esac
+}
+
+main "$@"
