@@ -361,6 +361,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "clap_complete",
+ "console",
  "globset",
  "indicatif",
  "predicates",

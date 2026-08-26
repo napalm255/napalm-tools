@@ -129,7 +129,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 let (resolved, platform) = resolve(matches, &cli::overrides_from(show))?;
                 ui.data(&match ui.format() {
                     Format::Json => json::to_string(&json::config_view(&resolved, &platform)),
-                    _ => report::render_resolved(&resolved, &platform),
+                    _ => report::render_resolved(&resolved, &platform, ui.theme()),
                 });
                 Ok(ExitCode::SUCCESS)
             }
@@ -140,14 +140,14 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
             ui.data(&match ui.format() {
                 Format::Json => json::to_string(&json::bundles_view(&resolved, &platform)),
-                _ => report::render_bundles(&resolved, &platform),
+                _ => report::render_bundles(&resolved, &platform, ui.theme()),
             });
             Ok(ExitCode::SUCCESS)
         }
 
         Some(("status", sub)) => {
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
-            let snapshot = execute::snapshot(&platform)?;
+            let snapshot = execute::snapshot(&platform, ui)?;
             let built = plan::build(&resolved, &platform, &snapshot);
 
             if ui.format() == Format::Json {
@@ -162,7 +162,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
             out.push('\n');
             // Not a dry run - status simply never acts, so the banner would
             // be misleading here.
-            out.push_str(&report::render_plan(&built, false));
+            out.push_str(&report::render_plan(&built, false, ui.theme()));
             ui.data(&out);
             Ok(ExitCode::SUCCESS)
         }
@@ -170,7 +170,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
         Some(("apply", sub)) => {
             let dry_run = sub.get_flag("dry-run");
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
-            let snapshot = execute::snapshot(&platform)?;
+            let snapshot = execute::snapshot(&platform, ui)?;
             let mut built = plan::build(&resolved, &platform, &snapshot);
 
             let home = std::env::var("HOME").unwrap_or_default();
@@ -187,7 +187,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                 ui.data(&if json_mode {
                     json::to_string(&json::plan_view(&built, true))
                 } else {
-                    report::render_plan(&built, true)
+                    report::render_plan(&built, true, ui.theme())
                 });
             } else {
                 let report = if built.is_empty() {
@@ -210,7 +210,7 @@ fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
                     ui.summary(&report);
                     // Notes are shown whether or not anything ran, so an
                     // unprovisionable package is never silently dropped.
-                    ui.data(&report::render_notes(&built));
+                    ui.data(&report::render_notes(&built, ui.theme()));
                 }
             }
 

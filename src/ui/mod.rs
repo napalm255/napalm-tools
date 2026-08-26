@@ -14,12 +14,14 @@
 pub mod json;
 pub mod progress;
 pub mod scan;
+pub mod theme;
 
 use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::execute::RunReport;
+use theme::Theme;
 
 /// How output is rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,7 @@ enum Sink {
 /// The single point through which `nt` speaks.
 pub struct Ui {
     format: Format,
+    theme: Theme,
     /// 0 captures subprocess output; 1 or more streams it through untouched.
     verbosity: u8,
     quiet: bool,
@@ -89,6 +92,7 @@ impl Ui {
     pub fn new(format: Format, verbosity: u8, quiet: bool) -> Ui {
         Ui {
             format,
+            theme: Theme::for_format(format),
             verbosity,
             quiet,
             sink: Sink::Std,
@@ -106,6 +110,8 @@ impl Ui {
         let buf = Arc::new(Mutex::new(Captured::default()));
         let ui = Ui {
             format,
+            // Captured output is asserted on, so never decorated.
+            theme: Theme::plain(),
             verbosity: 0,
             quiet,
             sink: Sink::Capture(Arc::clone(&buf)),
@@ -122,6 +128,11 @@ impl Ui {
     /// The active format.
     pub fn format(&self) -> Format {
         self.format
+    }
+
+    /// The styles to render human-facing output with.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     /// Write the answer to stdout, exactly as given.
@@ -163,6 +174,23 @@ impl Ui {
     /// Never suppressed: a failure must not be silent in any mode.
     pub fn error(&self, msg: &str) {
         self.write_err(&format!("error: {msg}\n"));
+    }
+
+    /// Begin an open-ended activity with no step number - checking, probing,
+    /// anything whose duration is unknown and whose only news is that it is
+    /// still going.
+    pub fn probe(&self, label: &str) -> Probe<'_> {
+        let bar = if self.silent_steps() {
+            None
+        } else {
+            self.progress.spinner(label.to_string())
+        };
+        Probe {
+            ui: self,
+            label: label.to_string(),
+            bar,
+            started: std::time::Instant::now(),
+        }
     }
 
     /// Begin a step, returning a handle that reports its outcome.
@@ -268,6 +296,42 @@ impl Ui {
     }
 }
 
+/// An open-ended activity, shown while it runs and summarised when it ends.
+pub struct Probe<'a> {
+    ui: &'a Ui,
+    label: String,
+    bar: Option<indicatif::ProgressBar>,
+    started: std::time::Instant,
+}
+
+impl Probe<'_> {
+    /// Note what the activity is currently doing.
+    pub fn detail(&self, what: &str) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(format!("{}  {}", self.label, what));
+        }
+    }
+
+    /// Close the activity, replacing it with a one-line result.
+    pub fn finish(self, summary: &str) {
+        if let Some(bar) = self.bar {
+            bar.finish_and_clear();
+        }
+        if self.ui.silent_steps() {
+            return;
+        }
+        let theme = self.ui.theme();
+        self.ui.step_line(&format!(
+            "  {} {} {}\n",
+            theme.good.apply_to("·"),
+            summary,
+            theme
+                .dim
+                .apply_to(format!("({})", human_duration(self.started.elapsed())))
+        ));
+    }
+}
+
 /// A single running step.
 pub struct Step<'a> {
     ui: &'a Ui,
@@ -306,14 +370,16 @@ impl Step<'_> {
             return;
         }
 
-        let mark = if success { "ok" } else { "FAILED" };
+        let theme = self.ui.theme();
+        let mark = if success { theme.tick() } else { theme.cross() };
         let text = format!(
-            "  [{}/{}] {} {} ({})\n",
-            self.index,
-            self.total,
-            self.label,
+            "  {} {} {} {}\n",
+            theme
+                .dim
+                .apply_to(format!("[{}/{}]", self.index, self.total)),
+            theme.name.apply_to(&self.label),
             mark,
-            human_duration(elapsed)
+            theme.dim.apply_to(format!("({})", human_duration(elapsed)))
         );
 
         if let Some(bar) = self.bar {
