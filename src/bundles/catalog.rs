@@ -215,6 +215,24 @@ static CORE: &[Pkg] = &[
     },
     // Third-party tap; nt runs `brew tap` before installing.
     Pkg {
+        name: "devcontainer",
+        binary: Some("devcontainer"),
+        providers: &[Provider::new(ManagerId::Brew, "devcontainer")],
+    },
+    // No Homebrew formula: toolbox is an OS-level container tool, shipped by
+    // the distribution. Atomic images include it, so the binary check settles
+    // it there; elsewhere dnf can supply it. This is the one catalog package
+    // with no user-space provider.
+    Pkg {
+        name: "toolbox",
+        binary: Some("toolbox"),
+        providers: &[Provider::gated(
+            ManagerId::Dnf,
+            "toolbox",
+            Platforms::NOT_ATOMIC,
+        )],
+    },
+    Pkg {
         name: "powertmux",
         binary: Some("powertmux"),
         providers: &[Provider::tapped("powertmux", "powertmux/powertmux")],
