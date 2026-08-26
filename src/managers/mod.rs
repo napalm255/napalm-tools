@@ -71,6 +71,12 @@ pub struct Cmd {
     pub program: String,
     /// Its arguments.
     pub args: Vec<String>,
+    /// Whether this command may legitimately need elevated privileges.
+    ///
+    /// Such a command keeps the controlling terminal, because sudo's cached
+    /// credential is bound to the terminal it was entered on. Every other
+    /// command is detached, so an unexpected prompt fails instead of hanging.
+    pub privileged: bool,
 }
 
 impl Cmd {
@@ -83,7 +89,14 @@ impl Cmd {
         Cmd {
             program: program.to_string(),
             args: args.into_iter().map(|a| a.as_ref().to_string()).collect(),
+            privileged: false,
         }
+    }
+
+    /// Mark the command as one that may need elevated privileges.
+    pub fn privileged(mut self) -> Cmd {
+        self.privileged = true;
+        self
     }
 
     /// Render as a shell-quoted command line, for display.
@@ -97,9 +110,29 @@ impl Cmd {
     }
 
     /// Convert into a runnable process command.
+    ///
+    /// Ordinary commands are detached from the controlling terminal, so a
+    /// program that tries to prompt on `/dev/tty` fails at once rather than
+    /// waiting forever behind the spinner. Privileged commands keep the
+    /// terminal, because sudo's cached credential is bound to it.
     pub fn to_command(&self) -> std::process::Command {
-        let mut c = std::process::Command::new(&self.program);
-        c.args(&self.args);
+        self.build_command(!self.privileged)
+    }
+
+    /// Build the process command, detaching from the terminal or not.
+    fn build_command(&self, detach: bool) -> std::process::Command {
+        let mut c = if !detach || !setsid_available() {
+            let mut c = std::process::Command::new(&self.program);
+            c.args(&self.args);
+            c
+        } else {
+            let mut c = std::process::Command::new(SETSID);
+            // `--wait` makes setsid exit with the child's status rather than
+            // its own, so the outcome is still the command's.
+            c.arg("--wait").arg(&self.program).args(&self.args);
+            c
+        };
+        non_interactive_env(&mut c);
         c
     }
 
@@ -114,6 +147,7 @@ impl Cmd {
         use std::process::Stdio;
         use std::sync::mpsc;
 
+        self.ensure_program_exists()?;
         let started = std::time::Instant::now();
         let mut child = self
             .to_command()
@@ -177,13 +211,16 @@ impl Cmd {
         })
     }
 
-    /// Run the command with stdio inherited, so the child writes straight to
-    /// the terminal and keeps its own colour and progress rendering.
+    /// Run the command with stdio and the terminal inherited, so the child
+    /// writes straight to the terminal, keeps its own colour and progress
+    /// rendering, and can prompt if it needs to.
     pub fn run_streaming(&self) -> Result<CmdOutcome> {
+        self.ensure_program_exists()?;
         let started = std::time::Instant::now();
+        // Never detached: raw mode exists precisely so a command can use the
+        // terminal, including to ask a question.
         let status = self
-            .to_command()
-            .stdin(std::process::Stdio::null())
+            .build_command(false)
             .status()
             .with_context(|| format!("failed to run `{}`", self.to_shell()))?;
         Ok(CmdOutcome {
@@ -192,6 +229,24 @@ impl Cmd {
             duration: started.elapsed(),
             tail: Vec::new(),
         })
+    }
+
+    /// Fail before spawning if the program does not exist.
+    ///
+    /// Without this, detaching through `setsid` would turn "no such program"
+    /// into an ordinary non-zero exit, losing the distinction between a
+    /// command that failed and one that was never there.
+    fn ensure_program_exists(&self) -> Result<()> {
+        let found = if self.program.contains('/') {
+            std::path::Path::new(&self.program).is_file()
+        } else {
+            on_path(&self.program)
+        };
+        if found {
+            Ok(())
+        } else {
+            anyhow::bail!("`{}` is not installed or not on PATH", self.program)
+        }
     }
 
     /// Run the command, returning its stdout. Fails with the captured stderr
@@ -244,6 +299,35 @@ pub fn parse_lines(output: &str) -> HashSet<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The helper used to detach a command from the controlling terminal.
+const SETSID: &str = "setsid";
+
+/// Whether `setsid` can be found. Absent only on an unusual system; the
+/// fallback is to run attached, which is how `nt` behaved before.
+fn setsid_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let found = on_path(SETSID);
+        if !found {
+            tracing::debug!("setsid not found; commands will keep the terminal");
+        }
+        found
+    })
+}
+
+/// Tell every tool that offers the choice not to ask questions.
+///
+/// Detaching the terminal already prevents a prompt from blocking, but a tool
+/// that knows it is non-interactive fails with a far better message than one
+/// discovering its terminal has gone.
+fn non_interactive_env(command: &mut std::process::Command) {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1");
 }
 
 /// Lines of combined output retained for a failure report.
@@ -498,5 +582,108 @@ mod tests {
         let outcome = Cmd::new("sh", ["-c", "exit 7"]).run_streaming().unwrap();
 
         assert!(!outcome.success);
+    }
+
+    /// Our own session id, read from /proc.
+    fn our_session() -> String {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("own stat readable");
+        // The comm field can contain spaces, so count from the closing
+        // parenthesis rather than from the start of the line.
+        let after_comm = stat.rsplit_once(')').expect("stat has a comm field").1;
+        after_comm
+            .split_whitespace()
+            .nth(3)
+            .expect("session id present")
+            .to_string()
+    }
+
+    /// The session id a command reports for itself while still running.
+    fn session_reported_by(cmd: Cmd) -> String {
+        let mut seen = String::new();
+        cmd.run_captured(|l| seen.push_str(l.trim())).unwrap();
+        assert!(!seen.is_empty(), "command reported no session id");
+        seen
+    }
+
+    #[test]
+    fn an_ordinary_command_runs_in_its_own_session() {
+        // Detachment is what turns an invisible hang on a terminal prompt into
+        // an immediate, readable failure.
+        let reported = session_reported_by(Cmd::new("sh", ["-c", "ps -o sid= -p $$"]));
+
+        assert_ne!(
+            reported,
+            our_session(),
+            "an ordinary command should not share our session"
+        );
+    }
+
+    #[test]
+    fn a_privileged_command_keeps_our_session() {
+        // It has to, or sudo's tty-bound credential would not apply to it.
+        let reported = session_reported_by(Cmd::new("sh", ["-c", "ps -o sid= -p $$"]).privileged());
+
+        assert_eq!(reported, our_session());
+    }
+
+    #[test]
+    fn the_non_interactive_environment_reaches_the_child() {
+        let mut seen = Vec::new();
+        Cmd::new(
+            "sh",
+            ["-c", "echo \"$GIT_TERMINAL_PROMPT|$SSH_ASKPASS_REQUIRE\""],
+        )
+        .run_captured(|l| seen.push(l.to_string()))
+        .unwrap();
+
+        assert_eq!(seen, vec!["0|never"], "git and ssh must not try to prompt");
+    }
+
+    #[test]
+    fn the_non_interactive_environment_reaches_a_privileged_child_too() {
+        let mut seen = Vec::new();
+        Cmd::new("sh", ["-c", "echo $GIT_TERMINAL_PROMPT"])
+            .privileged()
+            .run_captured(|l| seen.push(l.to_string()))
+            .unwrap();
+
+        assert_eq!(seen, vec!["0"]);
+    }
+
+    #[test]
+    fn an_exit_status_survives_detachment() {
+        let outcome = Cmd::new("sh", ["-c", "exit 7"])
+            .run_captured(|_| {})
+            .unwrap();
+
+        assert!(!outcome.success);
+        assert!(outcome.status.contains('7'), "got {:?}", outcome.status);
+    }
+
+    #[test]
+    fn marking_a_command_privileged_is_visible() {
+        assert!(!Cmd::new("brew", ["install", "x"]).privileged);
+        assert!(Cmd::new("sudo", ["dnf"]).privileged().privileged);
+    }
+
+    #[test]
+    fn raw_mode_keeps_the_terminal_so_a_command_can_ask() {
+        // -v is the escape hatch for a command that needs to prompt; detaching
+        // it would defeat the entire purpose.
+        let outcome = Cmd::new("sh", ["-c", "test -t 0 || true"])
+            .run_streaming()
+            .unwrap();
+
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn streaming_does_not_route_through_setsid() {
+        let cmd = Cmd::new("sh", ["-c", "exit 0"]);
+        let detached = cmd.to_command();
+        let attached = cmd.build_command(false);
+
+        assert_eq!(attached.get_program(), "sh");
+        assert_eq!(detached.get_program(), SETSID, "ordinary runs detach");
     }
 }
