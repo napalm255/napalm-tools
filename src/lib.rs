@@ -9,3 +9,4 @@ pub mod managers;
 pub mod plan;
 pub mod platform;
 pub mod report;
+pub mod ui;

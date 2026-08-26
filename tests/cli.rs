@@ -332,3 +332,167 @@ fn bare_nt_shows_help_rather_than_doing_anything() {
         .failure()
         .stderr(predicates::str::contains("Usage"));
 }
+
+// --- output formats ---------------------------------------------------------
+
+/// Parse a command's stdout as JSON, failing loudly if anything else leaked in.
+fn stdout_json(out: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8(out.to_vec()).unwrap();
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("stdout was not pure JSON ({e}):\n{text}"))
+}
+
+#[test]
+fn bundles_emits_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["bundles", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v = stdout_json(&out);
+    let names: Vec<&str> = v["bundles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"core"), "got {names:?}");
+    assert_eq!(v["bundles"][0]["enabled"], true);
+}
+
+#[test]
+fn a_dry_run_emits_valid_json_with_the_commands_it_would_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["apply", "--dry-run", "--desktop", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    assert!(v["actions"].is_array());
+    // The unavailable package is machine-readable too, not just prose.
+    let unavailable: Vec<&str> = v["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["package"].as_str().unwrap())
+        .collect();
+    assert!(unavailable.contains(&"xdotool"), "got {unavailable:?}");
+}
+
+#[test]
+fn config_show_emits_valid_json_reporting_the_platform() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["config", "show", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(stdout_json(&out)["platform"]["atomic"], true);
+}
+
+#[test]
+fn json_output_carries_no_ansi_escapes() {
+    // Otherwise redirecting to a file produces something no parser accepts.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["bundles", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        !String::from_utf8(out).unwrap().contains('\u{1b}'),
+        "escape sequences leaked into stdout"
+    );
+}
+
+#[test]
+fn diagnostics_stay_off_stdout() {
+    // The whole point of the channel split: stdout is the answer, nothing else.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let assert = on_atomic(&cfg)
+        .args(["apply", "--dry-run", "--desktop", "--output", "json", "-v"])
+        .assert()
+        .success();
+
+    stdout_json(&assert.get_output().stdout);
+}
+
+#[test]
+fn plain_output_is_requestable_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    on_atomic(&cfg)
+        .args(["bundles", "--output", "plain"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("core"));
+}
+
+#[test]
+fn verbosity_is_accepted_without_changing_the_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let quiet_run = on_atomic(&cfg)
+        .args(["apply", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let loud_run = on_atomic(&cfg)
+        .args(["apply", "--dry-run", "-vv"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        String::from_utf8(quiet_run).unwrap(),
+        String::from_utf8(loud_run).unwrap(),
+        "verbosity should change diagnostics, not the answer"
+    );
+}
+
+#[test]
+fn status_emits_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_file(&dir, "");
+
+    let out = on_atomic(&cfg)
+        .args(["status", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(stdout_json(&out)["actions"].is_array());
+}

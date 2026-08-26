@@ -59,7 +59,17 @@ pub fn command() -> Command {
                 .long("verbose")
                 .action(ArgAction::Count)
                 .global(true)
-                .help("Increase logging detail; repeat for more"),
+                .help("Show raw command output; repeat to add debug logging"),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .value_name("FORMAT")
+                .global(true)
+                .value_parser(clap::builder::PossibleValuesParser::new([
+                    "pretty", "plain", "json",
+                ]))
+                .help("Output format [default: pretty on a terminal, plain otherwise]"),
         )
         .arg(
             Arg::new("quiet")
@@ -332,5 +342,47 @@ mod tests {
                 "{argv:?} should be accepted"
             );
         }
+    }
+
+    #[test]
+    fn the_output_format_is_accepted_on_every_subcommand() {
+        for argv in [
+            vec!["nt", "apply", "--output", "json"],
+            vec!["nt", "status", "--output", "json"],
+            vec!["nt", "bundles", "--output", "json"],
+            vec!["nt", "config", "show", "--output", "json"],
+        ] {
+            assert!(
+                command().try_get_matches_from(&argv).is_ok(),
+                "{argv:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_output_format_is_rejected() {
+        assert!(
+            command()
+                .try_get_matches_from(["nt", "bundles", "--output", "yaml"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn verbosity_counts_up() {
+        let m = parse(&["nt", "apply", "-vv"]);
+
+        assert_eq!(m.get_count("verbose"), 2);
+    }
+
+    #[test]
+    fn the_verbose_help_describes_raw_output_not_just_logging() {
+        // The flag changed meaning; the help has to say so.
+        let help = command().render_long_help().to_string();
+
+        assert!(
+            help.contains("raw command output"),
+            "help should explain -v shows raw output"
+        );
     }
 }

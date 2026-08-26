@@ -103,6 +103,97 @@ impl Cmd {
         c
     }
 
+    /// Run the command with its output captured, invoking `on_line` for each
+    /// line of stdout and stderr as it arrives.
+    ///
+    /// `stdin` is null. A command that unexpectedly waits for input then fails
+    /// immediately rather than hanging forever against a pipe nobody is
+    /// feeding - much the worst failure mode available here.
+    pub fn run_captured(&self, mut on_line: impl FnMut(&str)) -> Result<CmdOutcome> {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        use std::sync::mpsc;
+
+        let started = std::time::Instant::now();
+        let mut child = self
+            .to_command()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to run `{}`", self.to_shell()))?;
+
+        // One reader thread per pipe, both feeding a single channel, so the
+        // two streams interleave in arrival order and neither can fill its
+        // buffer and deadlock the child.
+        let (tx, rx) = mpsc::channel::<String>();
+        let mut readers = Vec::new();
+        for pipe in [
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tx = tx.clone();
+            readers.push(std::thread::spawn(move || {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    // A closed receiver just means nobody is listening.
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        // Both clones live in the threads now; drop ours so the channel ends.
+        drop(tx);
+
+        let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        for line in rx {
+            on_line(&line);
+            tail.push_back(line);
+            if tail.len() > TAIL_LINES {
+                tail.pop_front();
+            }
+        }
+        for reader in readers {
+            let _ = reader.join();
+        }
+
+        let status = child
+            .wait()
+            .with_context(|| format!("failed to wait for `{}`", self.to_shell()))?;
+        Ok(CmdOutcome {
+            success: status.success(),
+            status: status.to_string(),
+            duration: started.elapsed(),
+            tail: tail.into(),
+        })
+    }
+
+    /// Run the command with stdio inherited, so the child writes straight to
+    /// the terminal and keeps its own colour and progress rendering.
+    pub fn run_streaming(&self) -> Result<CmdOutcome> {
+        let started = std::time::Instant::now();
+        let status = self
+            .to_command()
+            .stdin(std::process::Stdio::null())
+            .status()
+            .with_context(|| format!("failed to run `{}`", self.to_shell()))?;
+        Ok(CmdOutcome {
+            success: status.success(),
+            status: status.to_string(),
+            duration: started.elapsed(),
+            tail: Vec::new(),
+        })
+    }
+
     /// Run the command, returning its stdout. Fails with the captured stderr
     /// tail so a subprocess failure is diagnosable from the error alone.
     pub fn output(&self) -> Result<String> {
@@ -153,6 +244,30 @@ pub fn parse_lines(output: &str) -> HashSet<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Lines of combined output retained for a failure report.
+const TAIL_LINES: usize = 20;
+
+/// The result of running a command.
+#[derive(Debug, Clone)]
+pub struct CmdOutcome {
+    /// Whether the command exited successfully.
+    pub success: bool,
+    /// How the command exited, rendered for display.
+    pub status: String,
+    /// How long it took.
+    pub duration: std::time::Duration,
+    /// The last [`TAIL_LINES`] lines of combined output, for diagnosing a
+    /// failure. Empty when output was inherited rather than captured.
+    pub tail: Vec<String>,
+}
+
+impl CmdOutcome {
+    /// The retained output as text, for an error message.
+    pub fn tail_text(&self) -> String {
+        self.tail.join("\n")
+    }
 }
 
 /// Quote a single word for display in a shell command line.
@@ -284,5 +399,104 @@ mod tests {
         for m in all() {
             assert!(!m.binary().is_empty(), "{} has no binary", m.id());
         }
+    }
+
+    #[test]
+    fn captured_output_reaches_the_line_callback() {
+        let mut seen = Vec::new();
+        let cmd = Cmd::new("sh", ["-c", "echo alpha; echo beta"]);
+
+        let outcome = cmd.run_captured(|l| seen.push(l.to_string())).unwrap();
+
+        assert!(outcome.success);
+        assert_eq!(seen, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn stderr_is_captured_as_well_as_stdout() {
+        let mut seen = Vec::new();
+        let cmd = Cmd::new("sh", ["-c", "echo to-stderr 1>&2"]);
+
+        cmd.run_captured(|l| seen.push(l.to_string())).unwrap();
+
+        assert_eq!(seen, vec!["to-stderr"]);
+    }
+
+    #[test]
+    fn a_failing_command_reports_failure_rather_than_erroring() {
+        // The command ran; it just failed. That is an outcome, not an error.
+        let cmd = Cmd::new("sh", ["-c", "exit 3"]);
+
+        let outcome = cmd.run_captured(|_| {}).unwrap();
+
+        assert!(!outcome.success);
+        assert!(outcome.status.contains('3'), "got {:?}", outcome.status);
+    }
+
+    #[test]
+    fn a_missing_program_is_an_error() {
+        let cmd = Cmd::new("nt-no-such-program-exists", ["--version"]);
+
+        assert!(cmd.run_captured(|_| {}).is_err());
+    }
+
+    #[test]
+    fn the_tail_keeps_the_last_lines_for_a_failure_report() {
+        let cmd = Cmd::new("sh", ["-c", "for i in $(seq 1 50); do echo line$i; done"]);
+
+        let outcome = cmd.run_captured(|_| {}).unwrap();
+
+        assert_eq!(outcome.tail.len(), TAIL_LINES);
+        assert_eq!(outcome.tail.last().unwrap(), "line50");
+        assert_eq!(outcome.tail.first().unwrap(), "line31");
+    }
+
+    #[test]
+    fn stdin_is_closed_so_a_prompting_command_cannot_hang() {
+        // Reading stdin sees EOF at once; without this the test would block.
+        let cmd = Cmd::new("sh", ["-c", "read answer; echo \"got:$answer\""]);
+
+        let mut seen = Vec::new();
+        cmd.run_captured(|l| seen.push(l.to_string())).unwrap();
+
+        // Reaching this line at all is most of the point: with an inherited or
+        // unfed stdin the read would block and the test would never return.
+        assert_eq!(seen, vec!["got:"], "stdin should be at EOF immediately");
+    }
+
+    #[test]
+    fn a_command_that_depends_on_stdin_fails_rather_than_blocking() {
+        // `read` alone, so its non-zero status at EOF is the script's status.
+        let outcome = Cmd::new("sh", ["-c", "read answer"])
+            .run_captured(|_| {})
+            .unwrap();
+
+        assert!(!outcome.success);
+    }
+
+    #[test]
+    fn a_duration_is_recorded() {
+        let cmd = Cmd::new("sh", ["-c", "exit 0"]);
+
+        let outcome = cmd.run_captured(|_| {}).unwrap();
+
+        assert!(outcome.duration.as_nanos() > 0);
+    }
+
+    #[test]
+    fn streaming_reports_success_without_capturing() {
+        let cmd = Cmd::new("sh", ["-c", "exit 0"]);
+
+        let outcome = cmd.run_streaming().unwrap();
+
+        assert!(outcome.success);
+        assert!(outcome.tail.is_empty(), "streaming captures nothing");
+    }
+
+    #[test]
+    fn streaming_reports_a_failure() {
+        let outcome = Cmd::new("sh", ["-c", "exit 7"]).run_streaming().unwrap();
+
+        assert!(!outcome.success);
     }
 }

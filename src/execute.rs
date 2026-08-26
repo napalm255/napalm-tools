@@ -6,6 +6,30 @@ use std::collections::{BTreeMap, HashSet};
 use crate::managers::{self, Cmd, ManagerId};
 use crate::plan::{ActionPlan, Snapshot};
 use crate::platform::Platform;
+use crate::ui::Ui;
+use crate::ui::scan::{Findings, Scanner};
+
+/// What one step of a run did.
+#[derive(Debug, Clone)]
+pub struct StepOutcome {
+    /// The command, as it would be typed.
+    pub command: String,
+    /// How long it took.
+    pub duration: std::time::Duration,
+    /// Whether it succeeded.
+    pub success: bool,
+}
+
+/// What a whole run did, for the end-of-run summary.
+#[derive(Debug, Clone, Default)]
+pub struct RunReport {
+    /// Each step, in order.
+    pub steps: Vec<StepOutcome>,
+    /// Anything worth surfacing from the managers' output.
+    pub findings: Findings,
+    /// Wall-clock time for the run.
+    pub total: std::time::Duration,
+}
 
 /// Query every manager for what it has installed.
 ///
@@ -55,32 +79,62 @@ fn binaries_on_path() -> HashSet<String> {
 }
 
 /// Run every action in a plan, in order.
-pub fn run(plan: &ActionPlan, quiet: bool) -> Result<()> {
+pub fn run(plan: &ActionPlan, ui: &Ui) -> Result<RunReport> {
     let mut commands: Vec<Cmd> = plan.actions.iter().map(|a| a.to_cmd()).collect();
     // Dotfiles come last, so chezmoi itself can have been installed by the
     // package actions above on a fresh machine.
     commands.extend(plan.dotfiles.iter().cloned());
-    run_commands(&commands, quiet)
+    run_commands(&commands, ui)
 }
 
 /// Run a sequence of commands, stopping at the first failure.
 ///
-/// Output is inherited rather than captured so package managers can show their
-/// own progress; a failure is reported with the command that caused it.
-pub fn run_commands(commands: &[Cmd], quiet: bool) -> Result<()> {
-    for cmd in commands {
-        if !quiet {
-            println!("  + {}", cmd.to_shell());
-        }
-        let status = cmd
-            .to_command()
-            .status()
-            .with_context(|| format!("failed to run `{}`", cmd.to_shell()))?;
-        if !status.success() {
-            anyhow::bail!("`{}` exited with {}", cmd.to_shell(), status);
+/// Output is captured by default and scanned for the few lines worth showing;
+/// under `-v` it streams through untouched instead. A failure carries the
+/// command and the tail of its output, so capturing leaves a failure easier to
+/// diagnose than inheriting stdio did, not harder.
+pub fn run_commands(commands: &[Cmd], ui: &Ui) -> Result<RunReport> {
+    let started = std::time::Instant::now();
+    let mut report = RunReport::default();
+    let total = commands.len();
+
+    for (i, cmd) in commands.iter().enumerate() {
+        let label = cmd.to_shell();
+        let step = ui.step(i + 1, total, &label);
+
+        let outcome = if ui.raw_subprocess_output() {
+            cmd.run_streaming()?
+        } else {
+            let mut scanner = Scanner::new(label.clone());
+            let outcome = cmd.run_captured(|line| {
+                step.detail(line);
+                scanner.line(line);
+            })?;
+            let found = scanner.finish();
+            report.findings.caveats.extend(found.caveats);
+            report.findings.warnings.extend(found.warnings);
+            outcome
+        };
+
+        step.finish(outcome.success, outcome.duration);
+        report.steps.push(StepOutcome {
+            command: label.clone(),
+            duration: outcome.duration,
+            success: outcome.success,
+        });
+
+        if !outcome.success {
+            report.total = started.elapsed();
+            let tail = outcome.tail_text();
+            if tail.is_empty() {
+                anyhow::bail!("`{label}` {}", outcome.status);
+            }
+            anyhow::bail!("`{label}` {}\n{tail}", outcome.status);
         }
     }
-    Ok(())
+
+    report.total = started.elapsed();
+    Ok(report)
 }
 
 /// Packages each manager reports as explicitly requested, for `nt status`.
@@ -101,4 +155,101 @@ pub fn explicit_packages(platform: &Platform) -> Result<BTreeMap<ManagerId, usiz
         counts.insert(manager.id(), count);
     }
     Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{Format, Ui};
+
+    fn ui() -> Ui {
+        Ui::capturing(Format::Plain).0
+    }
+
+    #[test]
+    fn every_command_is_recorded_in_order() {
+        let cmds = vec![
+            Cmd::new("sh", ["-c", "echo one"]),
+            Cmd::new("sh", ["-c", "echo two"]),
+        ];
+
+        let report = run_commands(&cmds, &ui()).unwrap();
+
+        assert_eq!(report.steps.len(), 2);
+        assert!(report.steps.iter().all(|s| s.success));
+        assert!(report.steps[0].command.contains("echo one"));
+    }
+
+    #[test]
+    fn a_failure_stops_the_run() {
+        let cmds = vec![
+            Cmd::new("sh", ["-c", "exit 1"]),
+            Cmd::new("sh", ["-c", "echo should-not-run"]),
+        ];
+
+        let err = run_commands(&cmds, &ui()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("exit"), "got {err:#}");
+    }
+
+    #[test]
+    fn a_failure_carries_the_output_tail() {
+        // Capturing output must not make a failure harder to diagnose.
+        let cmds = vec![Cmd::new(
+            "sh",
+            ["-c", "echo 'something went wrong' 1>&2; exit 2"],
+        )];
+
+        let err = run_commands(&cmds, &ui()).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("something went wrong"),
+            "the tail should be in the error, got {err:#}"
+        );
+    }
+
+    #[test]
+    fn caveats_in_output_are_collected() {
+        let cmds = vec![Cmd::new(
+            "sh",
+            ["-c", "echo '==> Caveats'; echo 'run this in your shell'"],
+        )];
+
+        let report = run_commands(&cmds, &ui()).unwrap();
+
+        assert_eq!(
+            report.findings.caveats.len(),
+            1,
+            "got {:?}",
+            report.findings
+        );
+        assert_eq!(
+            report.findings.caveats[0].lines,
+            vec!["run this in your shell"]
+        );
+    }
+
+    #[test]
+    fn warnings_in_output_are_collected() {
+        let cmds = vec![Cmd::new("sh", ["-c", "echo 'Warning: already installed'"])];
+
+        let report = run_commands(&cmds, &ui()).unwrap();
+
+        assert_eq!(report.findings.warnings.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_run_reports_nothing() {
+        let report = run_commands(&[], &ui()).unwrap();
+
+        assert!(report.steps.is_empty());
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn a_total_duration_is_recorded() {
+        let report = run_commands(&[Cmd::new("sh", ["-c", "exit 0"])], &ui()).unwrap();
+
+        assert!(report.total >= report.steps[0].duration);
+    }
 }

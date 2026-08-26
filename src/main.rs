@@ -5,6 +5,7 @@ use clap::ArgMatches;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use napalm_tools::ui::{Format, Ui, json};
 use napalm_tools::{cli, config, dotfiles, execute, plan, platform, report};
 
 /// Exit code used when `--strict` is set and some package has no provider.
@@ -14,16 +15,33 @@ fn main() -> ExitCode {
     let matches = cli::command().get_matches();
     init_logging(&matches);
 
-    match dispatch(&matches) {
+    let ui = Ui::new(
+        format_from(&matches),
+        matches.get_count("verbose"),
+        matches.get_flag("quiet"),
+    );
+
+    match dispatch(&matches, &ui) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            ui.error(&format!("{err:#}"));
             ExitCode::FAILURE
         }
     }
 }
 
+/// The output format: what was asked for, or what suits the terminal.
+fn format_from(matches: &ArgMatches) -> Format {
+    matches
+        .get_one::<String>("output")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(Format::detect)
+}
+
 /// Configure logging from `-v` / `-q`, letting `RUST_LOG` win if it is set.
+///
+/// `-v` primarily switches subprocess output to raw passthrough; raising the
+/// tracing level alongside it is the secondary effect.
 fn init_logging(matches: &ArgMatches) {
     let default = if matches.get_flag("quiet") {
         "error"
@@ -31,7 +49,8 @@ fn init_logging(matches: &ArgMatches) {
         match matches.get_count("verbose") {
             0 => "warn",
             1 => "info",
-            _ => "debug",
+            2 => "debug",
+            _ => "trace",
         }
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -52,13 +71,11 @@ fn config_path(matches: &ArgMatches) -> PathBuf {
         .unwrap_or_else(config::default_path)
 }
 
-fn dispatch(matches: &ArgMatches) -> Result<ExitCode> {
-    let quiet = matches.get_flag("quiet");
-
+fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
     match matches.subcommand() {
         Some(("version", _)) => {
             // Deliberately bare, so it can be piped into other scripts.
-            println!("{}", clap::crate_version!());
+            ui.data(&format!("{}\n", clap::crate_version!()));
             Ok(ExitCode::SUCCESS)
         }
 
@@ -72,12 +89,15 @@ fn dispatch(matches: &ArgMatches) -> Result<ExitCode> {
 
         Some(("config", sub)) => match sub.subcommand() {
             Some(("path", _)) => {
-                println!("{}", config_path(matches).display());
+                ui.data(&format!("{}\n", config_path(matches).display()));
                 Ok(ExitCode::SUCCESS)
             }
-            Some(("show", _)) => {
-                let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
-                print!("{}", report::render_resolved(&resolved, &platform));
+            Some(("show", show)) => {
+                let (resolved, platform) = resolve(matches, &cli::overrides_from(show))?;
+                ui.data(&match ui.format() {
+                    Format::Json => json::to_string(&json::config_view(&resolved, &platform)),
+                    _ => report::render_resolved(&resolved, &platform),
+                });
                 Ok(ExitCode::SUCCESS)
             }
             _ => unreachable!("clap requires a config subcommand"),
@@ -85,7 +105,10 @@ fn dispatch(matches: &ArgMatches) -> Result<ExitCode> {
 
         Some(("bundles", sub)) => {
             let (resolved, platform) = resolve(matches, &cli::overrides_from(sub))?;
-            print!("{}", report::render_bundles(&resolved, &platform));
+            ui.data(&match ui.format() {
+                Format::Json => json::to_string(&json::bundles_view(&resolved, &platform)),
+                _ => report::render_bundles(&resolved, &platform),
+            });
             Ok(ExitCode::SUCCESS)
         }
 
@@ -94,13 +117,20 @@ fn dispatch(matches: &ArgMatches) -> Result<ExitCode> {
             let snapshot = execute::snapshot(&platform)?;
             let built = plan::build(&resolved, &platform, &snapshot);
 
-            for (manager, count) in execute::explicit_packages(&platform)? {
-                println!("{manager:<10} {count} explicitly installed");
+            if ui.format() == Format::Json {
+                ui.data(&json::to_string(&json::plan_view(&built, true)));
+                return Ok(ExitCode::SUCCESS);
             }
-            println!();
+
+            let mut out = String::new();
+            for (manager, count) in execute::explicit_packages(&platform)? {
+                out.push_str(&format!("{manager:<10} {count} explicitly installed\n"));
+            }
+            out.push('\n');
             // Not a dry run - status simply never acts, so the banner would
             // be misleading here.
-            print!("{}", report::render_plan(&built, false));
+            out.push_str(&report::render_plan(&built, false));
+            ui.data(&out);
             Ok(ExitCode::SUCCESS)
         }
 
@@ -114,18 +144,37 @@ fn dispatch(matches: &ArgMatches) -> Result<ExitCode> {
             let source_exists = dotfiles::source_dir(std::path::Path::new(&home)).exists();
             built.dotfiles = dotfiles::plan(&resolved.dotfiles, source_exists)?;
 
+            let json_mode = ui.format() == Format::Json;
+
             if dry_run {
-                print!("{}", report::render_plan(&built, true));
+                ui.data(&if json_mode {
+                    json::to_string(&json::plan_view(&built, true))
+                } else {
+                    report::render_plan(&built, true)
+                });
             } else {
-                if !built.is_empty() {
-                    execute::run(&built, quiet)?;
+                let report = if built.is_empty() {
+                    execute::RunReport::default()
+                } else {
+                    execute::run(&built, ui)?
+                };
+
+                if json_mode {
+                    // One document carrying both what was planned and what
+                    // happened, so a consumer needs only a single parse.
+                    ui.data(&json::to_string(&serde_json::json!({
+                        "plan": json::plan_view(&built, false),
+                        "run": json::report_view(&report),
+                    })));
+                } else {
+                    if built.is_empty() {
+                        ui.data("Nothing to do.\n");
+                    }
+                    ui.summary(&report);
+                    // Notes are shown whether or not anything ran, so an
+                    // unprovisionable package is never silently dropped.
+                    ui.data(&report::render_notes(&built));
                 }
-                if built.is_empty() {
-                    println!("Nothing to do.");
-                }
-                // Notes are shown whether or not anything ran, so an
-                // unprovisionable package is never silently dropped.
-                print!("{}", report::render_notes(&built));
             }
 
             if resolved.strict && !built.unavailable.is_empty() {
