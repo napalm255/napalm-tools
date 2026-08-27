@@ -28,6 +28,14 @@ fn nt(config: &Path, os_release: &str, atomic: bool, container: bool, graphical:
     // the plan. NT_TOOL_DIRS likewise hides the developer's tool installs.
     cmd.env("HOME", config.parent().unwrap())
         .env("NT_TOOL_DIRS", "")
+        // The update check must never reach the network from a test, nor
+        // read or write the developer's own cache.
+        .env("NT_NO_UPDATE_CHECK", "1")
+        .env(
+            "NT_UPDATE_CACHE",
+            config.parent().unwrap().join("update-check.json"),
+        )
+        .env_remove("CI")
         .env("NT_CONFIG", config)
         .env("NT_HOSTNAME", "testhost.example.com")
         .env("NT_OS_RELEASE", fixture(os_release))
@@ -573,4 +581,202 @@ fn the_dry_run_advisory_is_commentary_on_stderr_not_part_of_the_plan() {
         ));
 
     assert!(!stdout(assert).contains("Dry run"));
+}
+
+/// A `nt` whose update check is *not* disabled, with a fake curl on PATH so
+/// the check can be exercised without reaching the network.
+fn nt_with_check(config: &Path, release: &str) -> Command {
+    let mut cmd = on_atomic(config);
+    cmd.env_remove("NT_NO_UPDATE_CHECK")
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", fixture("fake-bin").display()),
+        )
+        .env("FAKE_LOG", config.parent().unwrap().join("calls.log"))
+        .env("FAKE_RELEASE_JSON", release);
+    cmd
+}
+
+/// A release document announcing a version far ahead of any real one.
+const A_NEWER_RELEASE: &str = r#"{"tag_name":"v99.0.0","assets":[]}"#;
+
+#[test]
+fn the_update_notice_goes_to_stderr_so_the_answer_still_parses() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    let assert = nt_with_check(&config, A_NEWER_RELEASE)
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("A newer nt is available"))
+        .stderr(predicate::str::contains("nt self update"));
+
+    assert!(!stdout(assert).contains("A newer nt"));
+}
+
+#[test]
+fn json_output_neither_prints_a_notice_nor_writes_a_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    let out = nt_with_check(&config, A_NEWER_RELEASE)
+        .args([
+            "status", "--output", "json", "--only", "core", "--skip", "core",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    serde_json::from_slice::<serde_json::Value>(&out).expect("the document parses");
+    assert!(!dir.path().join("update-check.json").exists());
+}
+
+#[test]
+fn quiet_neither_prints_a_notice_nor_writes_a_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .args([
+            "apply",
+            "--dry-run",
+            "-q",
+            "--only",
+            "core",
+            "--skip",
+            "core",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+
+    assert!(!dir.path().join("update-check.json").exists());
+}
+
+#[test]
+fn a_ci_environment_disables_the_check_entirely() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .env("CI", "true")
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("A newer nt").not());
+
+    assert!(!dir.path().join("update-check.json").exists());
+}
+
+#[test]
+fn the_environment_override_disables_the_check_entirely() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .env("NT_NO_UPDATE_CHECK", "1")
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("A newer nt").not());
+}
+
+#[test]
+fn update_check_false_in_the_configuration_disables_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(
+        &dir,
+        "[dotfiles]\nenabled = false\n\n[update]\ncheck = false\n",
+    );
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("A newer nt").not());
+
+    assert!(!dir.path().join("update-check.json").exists());
+}
+
+#[test]
+fn a_check_that_cannot_reach_the_network_changes_nothing() {
+    // Advisory by construction: a failed check is not a failed command.
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .env("FAKE_CURL_STATUS", "7")
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("A newer nt").not());
+}
+
+#[test]
+fn a_fresh_cache_is_believed_without_asking_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+    let cache = dir.path().join("update-check.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &cache,
+        format!(r#"{{"checked_at":{now},"latest":"99.0.0"}}"#),
+    )
+    .unwrap();
+
+    nt_with_check(&config, A_NEWER_RELEASE)
+        .args(["status", "--only", "core", "--skip", "core"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("99.0.0"));
+
+    let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap_or_default();
+    assert!(!calls.contains("api.github.com"), "asked again: {calls}");
+}
+
+#[test]
+fn commands_that_are_piped_into_other_programs_never_check() {
+    // shell-init runs on every shell start-up; version and completions are
+    // read by scripts. None of them may pause for the network.
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[dotfiles]\nenabled = false\n");
+
+    for args in [
+        vec!["shell-init", "bash"],
+        vec!["version"],
+        vec!["completions", "bash"],
+        vec!["bundles"],
+        vec!["config", "show"],
+    ] {
+        nt_with_check(&config, A_NEWER_RELEASE)
+            .args(&args)
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("A newer nt").not());
+    }
+
+    let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap_or_default();
+    assert!(!calls.contains("api.github.com"), "{calls}");
+}
+
+#[test]
+fn config_show_reports_the_update_check_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_file(&dir, "[update]\ncheck = false\n");
+
+    let out = stdout(
+        on_atomic(&config)
+            .args(["config", "show"])
+            .assert()
+            .success(),
+    );
+
+    assert!(out.contains("update:   check=false"), "got: {out}");
 }
