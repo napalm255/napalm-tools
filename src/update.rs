@@ -10,10 +10,13 @@
 //! bootstrap does for the Homebrew installer, so no TLS stack enters the
 //! dependency graph for the sake of one API call a day.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::managers::Cmd;
+use crate::ui::{Format, Ui};
 use crate::version::Version;
 
 /// The repository releases come from, derived from the manifest so there is
@@ -256,6 +259,389 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// --- Doing it ---------------------------------------------------------------
+
+/// How long to wait on the API when a person is waiting for the answer.
+const CHECK_TIMEOUT: &str = "3";
+/// How long to wait when they asked for this explicitly.
+const FETCH_TIMEOUT: &str = "30";
+
+/// Fetch release metadata from the GitHub API.
+///
+/// `tag` names a specific release; `None` asks for the latest. `nt` does no
+/// HTTP itself - curl is already a bootstrap prerequisite, and a TLS stack
+/// in the dependency graph for one call a day is not a trade worth making.
+pub fn fetch_release(tag: Option<&str>, timeout: &str) -> Result<Release> {
+    let url = match tag {
+        Some(tag) => format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}"),
+        None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
+    };
+    let body = Cmd::new(
+        "curl",
+        [
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            timeout,
+            "-H",
+            "Accept: application/vnd.github+json",
+            &url,
+        ],
+    )
+    .output()
+    .with_context(|| format!("could not reach {url}"))?;
+    serde_json::from_str(&body).with_context(|| format!("could not read the release from {url}"))
+}
+
+/// Download `url` to `into`.
+fn download(url: &str, into: &Path) -> Result<()> {
+    Cmd::new(
+        "curl",
+        [
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--max-time",
+            "300",
+            "-o",
+            &into.to_string_lossy(),
+            url,
+        ],
+    )
+    .output()
+    .with_context(|| format!("could not download {url}"))?;
+    Ok(())
+}
+
+/// What an update did, or would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// The binary was replaced.
+    Updated,
+    /// It was already the newest release.
+    Current,
+    /// A dry run: this is what it would have installed.
+    WouldUpdate,
+}
+
+impl Action {
+    /// The word used in JSON output, which is an interface.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::Updated => "updated",
+            Action::Current => "current",
+            Action::WouldUpdate => "would-update",
+        }
+    }
+}
+
+/// The outcome of `self check` or `self update`.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    /// The version that was running.
+    pub current: Version,
+    /// The newest release seen.
+    pub latest: Version,
+    /// What happened.
+    pub action: Action,
+    /// The binary in question.
+    pub path: PathBuf,
+}
+
+/// Where this binary lives, resolved through any symlink.
+fn current_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("nt cannot find its own executable")?;
+    Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
+}
+
+/// The home directory, for classifying an install path.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Refuse a binary another tool owns, or one this user cannot replace.
+fn ensure_replaceable(exe: &Path) -> Result<()> {
+    if let Install::Managed { by, instead } = install_kind(exe, home().as_deref()) {
+        bail!(
+            "{} was installed by {by}; run `{instead}` instead",
+            exe.display()
+        );
+    }
+    let dir = exe
+        .parent()
+        .with_context(|| format!("{} has no parent directory", exe.display()))?;
+    // The rename replaces a directory entry, so it is the directory's
+    // permissions that decide, not the file's.
+    if std::fs::metadata(dir)
+        .map(|m| m.permissions().readonly())
+        .unwrap_or(true)
+    {
+        bail!(
+            "cannot replace {}: {} is not writable by this user",
+            exe.display(),
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// `nt self check`: report whether a newer release exists.
+pub fn check_command(ui: &Ui) -> Result<()> {
+    let current = Version::current();
+    let release = fetch_release(None, FETCH_TIMEOUT)?;
+    let latest = release.version()?;
+    let exe = current_exe()?;
+
+    // Refresh the cache: an explicit check is the best possible answer, and
+    // caching it stops the automatic one asking again an hour later.
+    if let Some(path) = cache_path() {
+        write_cache(
+            &path,
+            &Cached {
+                checked_at: now_secs(),
+                latest: latest.to_string(),
+            },
+        );
+    }
+
+    let action = if latest > current {
+        Action::WouldUpdate
+    } else {
+        Action::Current
+    };
+    report(
+        ui,
+        &Outcome {
+            current,
+            latest,
+            action,
+            path: exe,
+        },
+    );
+    Ok(())
+}
+
+/// `nt self update`: install the latest release over this binary.
+pub fn update_command(dry_run: bool, force: bool, want: Option<&str>, ui: &Ui) -> Result<()> {
+    let current = Version::current();
+    let exe = current_exe()?;
+    ensure_replaceable(&exe)?;
+
+    let tag = want.map(|v| format!("v{}", v.trim_start_matches('v')));
+    let release = fetch_release(tag.as_deref(), FETCH_TIMEOUT)?;
+    let latest = release.version()?;
+
+    // Asking for a version by name means installing it, whichever way it
+    // compares - that is the way back from a bad release.
+    if latest <= current && !force && want.is_none() {
+        report(
+            ui,
+            &Outcome {
+                current: current.clone(),
+                latest,
+                action: Action::Current,
+                path: exe,
+            },
+        );
+        return Ok(());
+    }
+
+    let arch = std::env::consts::ARCH;
+    let name = asset_name(&latest, arch);
+    let asset = pick_asset(&release, &name)?;
+
+    if dry_run {
+        report(
+            ui,
+            &Outcome {
+                current,
+                latest,
+                action: Action::WouldUpdate,
+                path: exe,
+            },
+        );
+        return Ok(());
+    }
+
+    // Stage beside the target: rename is atomic only within one filesystem,
+    // and /tmp is very often a different one.
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    let staging = tempfile::TempDir::new_in(dir)
+        .with_context(|| format!("cannot stage a download in {}", dir.display()))?;
+    let archive = staging.path().join(&name);
+    let sums = staging.path().join(format!("{name}.sha256"));
+
+    let step = ui.probe(&format!("Downloading nt {latest}"));
+    download(&asset.browser_download_url, &archive)?;
+    download(&format!("{}.sha256", asset.browser_download_url), &sums)?;
+    step.finish(&format!("downloaded nt {latest}"));
+
+    // Over HTTPS this guards against a truncated or corrupted download, not
+    // against a compromised host: both files come from the same place.
+    Cmd::new(
+        "sha256sum",
+        ["--check", "--strict", &format!("{name}.sha256")],
+    )
+    .in_dir(staging.path())
+    .output()
+    .with_context(|| format!("checksum verification failed for {name}; refusing to install"))?;
+
+    Cmd::new(
+        "tar",
+        [
+            "-xzf",
+            &name,
+            "--no-same-owner",
+            "-C",
+            &staging.path().to_string_lossy(),
+        ],
+    )
+    .in_dir(staging.path())
+    .output()
+    .with_context(|| format!("could not unpack {name}"))?;
+
+    // The expected layout is asserted rather than stripped, so a malformed
+    // archive gives a clear message instead of a mystery. The completions
+    // beside it are deliberately discarded: `nt completions <shell>`
+    // regenerates them, and writing into the user's shell directories
+    // behind their back is not this command's business.
+    let unpacked = staging.path().join(asset_dir(&latest, arch)).join("nt");
+    if !unpacked.is_file() {
+        bail!(
+            "{name} does not contain {}/nt; refusing to install",
+            asset_dir(&latest, arch)
+        );
+    }
+    std::fs::set_permissions(&unpacked, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("cannot make {} executable", unpacked.display()))?;
+
+    // Run it before trusting it: this is what catches a wrong-architecture
+    // build or a truncated file, while the old binary is still in place.
+    let reported = Cmd::new(&unpacked.to_string_lossy(), ["version"])
+        .output()
+        .with_context(|| {
+            format!(
+                "the downloaded nt does not run; leaving {} in place",
+                exe.display()
+            )
+        })?;
+    if reported.trim() != latest.to_string() {
+        bail!(
+            "the downloaded nt reports {:?}, expected {latest}; leaving {} in place",
+            reported.trim(),
+            exe.display()
+        );
+    }
+
+    // Renaming over a running executable is fine: this process keeps the
+    // inode it is executing from, and only the directory entry changes.
+    // Writing in place would fail with ETXTBSY.
+    std::fs::rename(&unpacked, &exe)
+        .with_context(|| format!("cannot replace {}", exe.display()))?;
+
+    // The cached answer is now wrong, and stale by exactly the amount that
+    // would print a notice about the version we just installed.
+    if let Some(path) = cache_path() {
+        let _ = std::fs::remove_file(path);
+    }
+
+    report(
+        ui,
+        &Outcome {
+            current,
+            latest,
+            action: Action::Updated,
+            path: exe,
+        },
+    );
+    Ok(())
+}
+
+/// Render an outcome on the answer channel.
+fn report(ui: &Ui, outcome: &Outcome) {
+    if ui.format() == Format::Json {
+        ui.data(&crate::ui::json::to_string(&serde_json::json!({
+            "current": outcome.current.to_string(),
+            "latest": outcome.latest.to_string(),
+            "action": outcome.action.as_str(),
+            "path": outcome.path.to_string_lossy(),
+        })));
+        return;
+    }
+    let t = ui.theme();
+    ui.data(&match outcome.action {
+        Action::Updated => format!(
+            "{}\n",
+            t.with_icon(
+                &t.satisfied_icon(),
+                &format!(
+                    "{} -> {} ({})",
+                    outcome.current,
+                    t.good.apply_to(&outcome.latest),
+                    outcome.path.display()
+                )
+            )
+        ),
+        Action::Current => format!("nt {} is already the latest release.\n", outcome.current),
+        Action::WouldUpdate => format!(
+            "nt {} -> {} is available. Run `nt self update`.\n",
+            outcome.current,
+            t.good.apply_to(&outcome.latest)
+        ),
+    });
+}
+
+/// Print a notice on stderr when a newer nt has been released.
+///
+/// Advisory by construction: every failure is swallowed, nothing reaches
+/// stdout, and the whole thing - the network call included, not just the
+/// printing - is skipped under `--quiet`, under `--output json` and in CI.
+pub fn maybe_notice(ui: &Ui, enabled: bool) {
+    if !enabled
+        || ui.format() == Format::Json
+        || ui.is_quiet()
+        || std::env::var_os("NT_NO_UPDATE_CHECK").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("CI").is_some_and(|v| !v.is_empty())
+    {
+        return;
+    }
+    let Some(path) = cache_path() else { return };
+
+    let cached = read_cache(&path);
+    let latest = if cache_is_stale(cached.as_ref(), now_secs(), CHECK_INTERVAL) {
+        let Ok(release) = fetch_release(None, CHECK_TIMEOUT) else {
+            return;
+        };
+        let Ok(latest) = release.version() else {
+            return;
+        };
+        write_cache(
+            &path,
+            &Cached {
+                checked_at: now_secs(),
+                latest: latest.to_string(),
+            },
+        );
+        latest
+    } else {
+        let Ok(latest) = Version::parse(&cached.expect("fresh cache was read above").latest) else {
+            return;
+        };
+        latest
+    };
+
+    if let Some(notice) = notice_for(&Version::current(), &latest) {
+        ui.line(&notice);
+    }
 }
 
 #[cfg(test)]

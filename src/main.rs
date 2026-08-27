@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use napalm_tools::ui::{Format, Ui, json};
-use napalm_tools::{cli, config, dotfiles, execute, plan, platform, privilege, report, shell};
+use napalm_tools::{
+    cli, config, dotfiles, execute, plan, platform, privilege, report, shell, update,
+};
 
 /// Exit code used when `--strict` is set and some package has no provider.
 const EXIT_UNMET: u8 = 2;
@@ -23,13 +25,36 @@ fn main() -> ExitCode {
 
     let ui = Ui::new(format_from(flags), verbosity(flags), quiet(flags));
 
-    match dispatch(&matches, &ui) {
+    let code = match dispatch(&matches, &ui) {
         Ok(code) => code,
         Err(err) => {
             ui.error(&format!("{err:#}"));
             ExitCode::FAILURE
         }
+    };
+
+    // After the answer, never before it: an advisory notice must not
+    // interleave with a spinner or delay what was actually asked for.
+    update::maybe_notice(&ui, wants_update_check(&matches));
+    code
+}
+
+/// Whether this command should look for a newer nt.
+///
+/// Only the two commands a person runs at a keyboard. Never `shell-init`,
+/// which runs on every shell start-up, nor `version` and `completions`,
+/// whose output is piped into other programs.
+fn wants_update_check(matches: &ArgMatches) -> bool {
+    if !matches!(matches.subcommand_name(), Some("apply" | "status")) {
+        return false;
     }
+    let path = config_path(matches);
+    config::load(&path)
+        .ok()
+        .and_then(|file| {
+            config::resolve(&file, &config::hostmatch::hostname(), &Default::default()).ok()
+        })
+        .is_some_and(|resolved| resolved.update_check)
 }
 
 /// How many times `-v` was given. Zero where the flag is not defined at all.
@@ -117,6 +142,23 @@ fn refuse_root() -> Result<()> {
 
 fn dispatch(matches: &ArgMatches, ui: &Ui) -> Result<ExitCode> {
     match matches.subcommand() {
+        Some(("self", sub)) => match sub.subcommand() {
+            Some(("check", _)) => {
+                update::check_command(ui)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            Some(("update", m)) => {
+                update::update_command(
+                    m.get_flag("dry-run"),
+                    m.get_flag("force"),
+                    m.get_one::<String>("version").map(String::as_str),
+                    ui,
+                )?;
+                Ok(ExitCode::SUCCESS)
+            }
+            _ => unreachable!("clap requires a self subcommand"),
+        },
+
         Some(("version", _)) => {
             // Deliberately bare, so it can be piped into other scripts.
             ui.data(&format!("{}\n", clap::crate_version!()));
