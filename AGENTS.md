@@ -28,11 +28,14 @@ atomic). It never touches an immutable OS tree and never runs as root.
 | `src/privilege.rs` | Decides up front whether a run needs `sudo`; asks once |
 | `src/dotfiles.rs` | chezmoi bootstrap |
 | `src/shell.rs` | `nt shell-init` |
+| `src/version.rs` | Parsing and ordering release versions |
+| `src/update.rs` | `nt self check`/`nt self update`, and the daily notice |
 | `src/report.rs`, `src/ui/` | Text and JSON rendering, theme, spinner, output scanning |
 | `src/cli.rs` | clap command tree. Flags are declared per command, never globally |
 | `src/main.rs` | Dispatch and the three phases of `apply`: bootstrap, snapshot, converge |
 | `tests/cli.rs` | Integration tests driving the binary with `NT_*` overrides |
 | `tests/e2e/` | Container-driven end-to-end runs (Fedora and Bluefin) |
+| `tests/selfupdate.rs` | A real self-update against fake release assets |
 | `.devcontainer/` | The development image; also the Fedora e2e image |
 | `docs/superpowers/specs/` | Design records. Read the latest before changing behaviour |
 
@@ -68,11 +71,20 @@ there). `rust-toolchain.toml` carries `llvm-tools-preview` for coverage.
   `just ci` (lint, coverage with the floor, security) with the coverage
   summary in the job summary and `lcov.info` as an artifact, then the
   `e2e` matrix over Fedora and Bluefin. Concurrency cancels superseded runs;
-  every job has a timeout; the repository is private, so minutes are metered.
+  every job has a timeout.
+- `release.yml` - on every push to `main`: `ci.yml`, then release-please,
+  then the assets job. See below.
 - `security.yml` - weekly `just security` against an unchanged `main`.
-- `release.yml` - on a `v*` tag: the whole `ci.yml`, then `just
-  release-assets <tag>` (refuses a tag that does not match `Cargo.toml`) and
-  `gh release create` with generated notes. No caches in the publishing job.
+- Releases are driven by release-please from the Conventional Commits on
+  `main`: it grooms a release pull request that bumps `Cargo.toml`,
+  `Cargo.lock` and `CHANGELOG.md`, and merging it tags and creates the
+  release. The assets job then runs `just release-assets <tag>` (which
+  refuses a tag that does not match `Cargo.toml`) and `gh release upload
+  --clobber`. No caches in the publishing job.
+  **Do not add a `push: tags:` trigger.** release-please tags with
+  `GITHUB_TOKEN`, and GitHub starts no workflow run from a `GITHUB_TOKEN`
+  event, so such a job would never fire and the failure would be silent.
+  Expect the release pull request to show no checks, for the same reason.
 - `dependabot.yml` - Actions and Cargo weekly; mise tools are bumped by hand.
 
 Actions are pinned by commit SHA with the version in a comment. Resolve a
@@ -103,6 +115,11 @@ from memory. `zizmor` and `actionlint` run in `just lint-config`.
 9. **JSON keys are an interface.** Tests pin them. Add keys; do not rename.
 10. **No `unwrap`/`expect` on input paths.** `expect` only where clap or a
     catalog invariant makes failure impossible, with the reason in the message.
+11. **The update check is advisory.** It runs after the answer, never fails a
+    command, never writes to stdout, and is skipped entirely - the request
+    included, not just the printing - under `--quiet`, `--output json`, in CI,
+    and when `[update] check` is false. `nt self update` replaces the binary
+    only after the checksum, the layout and a run of the new binary all pass.
 
 ## Adding a package
 

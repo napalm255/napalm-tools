@@ -17,9 +17,33 @@
 #   FAKE_INSTALLED_NPM_JSON  JSON `npm ls -g --json` prints
 #   FAKE_TAPS                newline-separated taps `brew tap` reports
 #   FAKE_FLATPAK_REMOTES     newline-separated user remotes
+#   FAKE_RELEASE_JSON        body returned for an api.github.com releases query
+#   FAKE_ASSET_DIR           directory of prepared release assets, served by basename
+#   FAKE_CURL_STATUS         if set, every curl exits with it (a network failure)
 #
 # Each manager name is a symlink to this file; the name decides the role.
 set -euo pipefail
+
+# Fail like a real curl when the test asks for a network failure.
+curl_status() {
+  if [[ -n "${FAKE_CURL_STATUS:-}" ]]; then
+    echo "fake curl: simulated failure" >&2
+    exit "${FAKE_CURL_STATUS}"
+  fi
+}
+
+# Copy the prepared asset named by the URL to wherever -o points. Written
+# to a file rather than stdout because nt downloads binary content.
+serve_asset() {
+  local out="" url="" prev=""
+  for arg in "$@"; do
+    [[ "${prev}" == "-o" ]] && out="${arg}"
+    url="${arg}"
+    prev="${arg}"
+  done
+  cp "${FAKE_ASSET_DIR:?FAKE_ASSET_DIR must name the prepared assets}/$(basename "${url}")" \
+    "${out:?curl was called without -o}"
+}
 
 main() {
   local self name line empty='{}'
@@ -52,13 +76,29 @@ main() {
       [[ "${FAKE_SUDO_CACHED:-0}" == 1 || -e "${FAKE_TOOL_DIR:?}/.sudo-cached" ]]
       ;;
     "sudo -v") : >"${FAKE_TOOL_DIR:?}/.sudo-cached" ;;
-    "curl "*)
+    "curl "*"raw.githubusercontent.com/Homebrew/install"*)
       # The "Homebrew installer": a script that drops brew and mise into the
       # tool directory nt searches, exactly as the real one lands them off
       # the shell's PATH.
+      curl_status
       printf 'ln -sf %q %q\nln -sf %q %q\n' \
         "$self" "${FAKE_TOOL_DIR:?FAKE_TOOL_DIR must name the tool dir}/brew" \
         "$self" "${FAKE_TOOL_DIR}/mise"
+      ;;
+    "curl "*"api.github.com/repos/"*"/releases/"*)
+      curl_status
+      printf '%s\n' "${FAKE_RELEASE_JSON:?FAKE_RELEASE_JSON must be set for a release query}"
+      ;;
+    "curl "*"/releases/download/"*)
+      # An asset download: serve the prepared file that -o names.
+      curl_status
+      serve_asset "$@"
+      ;;
+    "curl "*)
+      # Every URL nt fetches has an arm above; anything else means a test
+      # forgot to stub one. 22 is what `curl -f` gives on an HTTP error.
+      echo "fake curl: no stub for: ${line}" >&2
+      exit 22
       ;;
     *) ;;
   esac

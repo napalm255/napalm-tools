@@ -161,6 +161,8 @@ pub struct ConfigView {
     pub upgrade: bool,
     /// Fail on an unprovisionable package.
     pub strict: bool,
+    /// Whether a normal run checks for a newer nt.
+    pub update_check: bool,
     /// Bundle states by name.
     pub bundles: std::collections::BTreeMap<String, bool>,
     /// Extra packages by manager.
@@ -339,6 +341,7 @@ pub fn config_view(resolved: &Resolved, platform: &Platform) -> ConfigView {
         prompt: resolved.prompt.clone(),
         upgrade: resolved.upgrade,
         strict: resolved.strict,
+        update_check: resolved.update_check,
         bundles: resolved.bundles.clone(),
         extra: resolved
             .extra
@@ -594,6 +597,33 @@ mod tests {
         assert_eq!(v["platform"]["graphical"], false);
         assert_eq!(v["prompt"], "starship");
         assert_eq!(v["upgrade"], false);
+        assert_eq!(v["update_check"], true);
+    }
+
+    #[test]
+    fn the_config_document_keys_are_stable() {
+        // This is an interface. A rename should fail here, not in a script.
+        let resolved = crate::config::resolve(
+            &crate::config::ConfigFile::default(),
+            "host.example.com",
+            &Default::default(),
+        )
+        .unwrap();
+
+        let v = parse(&to_string(&config_view(&resolved, &CONTAINER)));
+
+        assert_eq!(
+            keys(&v),
+            vec![
+                "bundles",
+                "extra",
+                "platform",
+                "prompt",
+                "strict",
+                "update_check",
+                "upgrade"
+            ]
+        );
     }
 
     #[test]

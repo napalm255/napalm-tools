@@ -58,6 +58,51 @@ pub fn command() -> Command {
         Command::new("bundles").about("List the catalog and each bundle's state here"),
     )));
 
+    // `self` rather than a top-level `update`, which would read as "update
+    // my packages" beside `apply --upgrade`. Neither takes --config: the
+    // [update] check setting governs the automatic notice, and an explicit
+    // request must not be silenced by a file.
+    let self_cmd = Command::new("self")
+        .about("Inspect and update nt itself")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("check")
+                .about("Report whether a newer nt has been released; changes nothing")
+                .arg(output_flag())
+                .arg(verbose_flag()),
+        )
+        .subcommand(
+            Command::new("update")
+                .about("Download the latest release and replace this binary")
+                .long_about(
+                    "Download the latest release and replace this binary.\n\n\
+                     Refuses when another tool owns the binary - Homebrew, cargo, \n\
+                     mise or the system - and names what to run instead.",
+                )
+                .arg(
+                    Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(ArgAction::SetTrue)
+                        .help("Say what would be installed without downloading it"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Install even if this binary is already current"),
+                )
+                .arg(
+                    Arg::new("version")
+                        .long("version")
+                        .value_name("X.Y.Z")
+                        .help("Install this release instead of the latest; implies --force"),
+                )
+                .arg(output_flag())
+                .arg(verbose_flag())
+                .arg(quiet_flag()),
+        );
+
     Command::new("nt")
         .about("Fast, private, idempotent user-space system configuration")
         .version(clap::crate_version!())
@@ -95,6 +140,7 @@ pub fn command() -> Command {
                 )
                 .arg(config_flag()),
         )
+        .subcommand(self_cmd)
         .subcommand(Command::new("version").about("Print the version alone, for scripts"))
         .subcommand(
             Command::new("completions")
@@ -300,6 +346,7 @@ mod tests {
             "status",
             "bundles",
             "config",
+            "self",
             "shell-init",
             "version",
             "completions",
@@ -406,5 +453,50 @@ mod tests {
         assert!(!help.contains("--no-core"), "{help}");
         assert!(help.contains("--skip"), "{help}");
         assert!(help.contains("raw command output"), "{help}");
+    }
+
+    #[test]
+    fn self_requires_one_of_its_two_subcommands() {
+        assert!(!accepted(&["nt", "self"]));
+        assert!(accepted(&["nt", "self", "check"]));
+        assert!(accepted(&["nt", "self", "update"]));
+        assert!(!accepted(&["nt", "self", "upgrade"]));
+    }
+
+    #[test]
+    fn only_self_update_takes_the_flags_that_change_what_is_installed() {
+        for flag in ["--dry-run", "--force"] {
+            assert!(accepted(&["nt", "self", "update", flag]), "{flag}");
+            assert!(!accepted(&["nt", "self", "check", flag]), "{flag}");
+        }
+        assert!(accepted(&["nt", "self", "update", "--version", "0.2.0"]));
+        assert!(!accepted(&["nt", "self", "check", "--version", "0.2.0"]));
+        assert!(accepted(&["nt", "self", "update", "-q"]));
+        assert!(!accepted(&["nt", "self", "check", "-q"]));
+    }
+
+    #[test]
+    fn self_reports_through_the_usual_output_flags() {
+        assert!(accepted(&["nt", "self", "check", "--output", "json"]));
+        assert!(accepted(&[
+            "nt", "self", "update", "--output", "json", "-v"
+        ]));
+        assert!(!accepted(&["nt", "self", "check", "--output", "yaml"]));
+    }
+
+    #[test]
+    fn self_reads_no_configuration_so_it_takes_no_config_flag() {
+        // The [update] check setting governs the automatic notice only; an
+        // explicit `nt self check` must not be silenced by a file.
+        assert!(!accepted(&["nt", "self", "check", "--config", "/x.toml"]));
+        assert!(!accepted(&["nt", "self", "update", "--config", "/x.toml"]));
+    }
+
+    #[test]
+    fn self_takes_no_bundle_selection_or_detail() {
+        assert!(!accepted(&["nt", "self", "check", "--detail"]));
+        assert!(!accepted(&["nt", "self", "update", "--detail"]));
+        assert!(!accepted(&["nt", "self", "check", "--only", "core"]));
+        assert!(!accepted(&["nt", "self", "update", "--skip", "core"]));
     }
 }

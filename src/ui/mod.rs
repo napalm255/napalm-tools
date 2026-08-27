@@ -142,6 +142,14 @@ impl Ui {
         self.format
     }
 
+    /// Whether output is suppressed on success.
+    ///
+    /// Callers that would do work solely to print something - the update
+    /// check - skip the work too, not just the printing.
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+
     /// The styles to render the answer on stdout with.
     pub fn theme(&self) -> &Theme {
         &self.theme

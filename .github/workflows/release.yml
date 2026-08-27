@@ -1,38 +1,85 @@
 name: release
 
-# Push a tag `vX.Y.Z` matching Cargo.toml's version. The whole CI workflow
-# runs first; only then is the archive built and attached to a GitHub
-# Release with notes generated from the commits since the previous tag.
+# Versions follow the Conventional Commits on main. release-please keeps a
+# "chore: release X.Y.Z" pull request up to date; merging it bumps
+# Cargo.toml, writes CHANGELOG.md, tags vX.Y.Z and creates the release. The
+# assets job then builds the archive and attaches it.
+#
+# The assets job chains off release-please's outputs rather than listening
+# for the tag: release-please tags with GITHUB_TOKEN, and GitHub does not
+# start workflow runs from GITHUB_TOKEN events, so a tag-triggered job would
+# never fire and the release would sit there with notes and no binaries.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  # Rebuild and re-attach the assets of a release that already exists, for
+  # when the assets job failed but the release itself was created.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to rebuild assets for
+        required: true
 
 permissions:
   contents: read
 
+# Two merges in quick succession must not race over the same release branch,
+# and a cancelled run can leave a release with no assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   verify:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
 
-  release:
+  release-please:
+    if: github.event_name == 'push'
     needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # commit the release branch, tag, and create the release
+      pull-requests: write  # open and groom the release pull request
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  assets:
+    needs: [verify, release-please]
+    # `release_created` is the string "true"; on a push that only groomed the
+    # release pull request it is empty and this job is skipped.
+    if: >-
+      always() && (needs.release-please.outputs.created == 'true' ||
+      github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag || inputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag || inputs.tag }}
       # No caches here: a job that publishes must build from nothing it
       # did not fetch itself, or a poisoned cache entry becomes a release.
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
         with:
           cache: false
+      # `just release-assets` refuses a tag that does not match Cargo.toml,
+      # which is now the check that release-please bumped what it tagged.
       - run: just release-assets "$TAG"
-        env:
-          TAG: ${{ github.ref_name }}
-      - run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+      # The release already exists, so `create` would be a 422; --clobber
+      # makes a workflow_dispatch rebuild idempotent.
+      - run: gh release upload "$TAG" dist/* --clobber
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}

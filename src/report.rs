@@ -437,6 +437,7 @@ pub fn render_resolved(resolved: &Resolved, platform: &Platform, theme: &Theme) 
     let _ = writeln!(out, "prompt:   {}", resolved.prompt);
     let _ = writeln!(out, "upgrade:  {}", resolved.upgrade);
     let _ = writeln!(out, "strict:   {}", resolved.strict);
+    let _ = writeln!(out, "update:   check={}", resolved.update_check);
     let _ = writeln!(
         out,
         "dotfiles: enabled={} apply={} repo={}",

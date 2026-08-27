@@ -1,8 +1,8 @@
 name: ci
 
+# No `push: branches: [main]` trigger: release.yml runs on main and calls
+# this workflow, so a push here would run the whole thing twice.
 on:
-  push:
-    branches: [main]
   pull_request:
   # release.yml runs this whole workflow before it publishes anything.
   workflow_call:
