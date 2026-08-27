@@ -14,3 +14,4 @@ pub mod privilege;
 pub mod report;
 pub mod shell;
 pub mod ui;
+pub mod version;
