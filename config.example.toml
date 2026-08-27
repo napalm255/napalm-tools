@@ -66,3 +66,14 @@ shell = { prompt = "oh-my-posh" }
 [host."build-*"]
 bundles  = { ai = false }
 dotfiles = { enabled = false }
+
+# --- Self-update ------------------------------------------------------------
+
+# Once a day, `nt apply` and `nt status` ask GitHub whether a newer nt has
+# been released and print a one-line notice on stderr. Nothing is installed:
+# `nt self update` does that, when you ask it to. The check is also skipped
+# under --quiet, under --output json, and whenever CI is set in the
+# environment.
+
+[update]
+check = true

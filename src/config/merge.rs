@@ -58,6 +58,8 @@ pub struct Resolved {
     pub dotfiles: DotfilesConfig,
     /// The shell prompt to install and activate.
     pub prompt: String,
+    /// Whether a normal run checks for a newer nt.
+    pub update_check: bool,
 }
 
 impl Resolved {
@@ -95,6 +97,7 @@ pub fn resolve(file: &ConfigFile, hostname: &str, cli: &CliOverrides) -> Result<
         strict: false,
         dotfiles: DotfilesConfig::default(),
         prompt: DEFAULT_PROMPT.to_string(),
+        update_check: true,
     };
 
     // 2. Global settings.
@@ -173,6 +176,9 @@ fn apply_layer(resolved: &mut Resolved, layer: &Layer) -> Result<()> {
     }
     if let Some(v) = layer.options.strict {
         resolved.strict = v;
+    }
+    if let Some(v) = layer.update.check {
+        resolved.update_check = v;
     }
     if let Some(v) = layer.dotfiles.enabled {
         resolved.dotfiles.enabled = v;
@@ -594,5 +600,31 @@ extra = { brew = ["dust"] }
             format!("{err:#}").contains("starship"),
             "should list choices"
         );
+    }
+
+    #[test]
+    fn the_update_check_is_on_by_default_and_can_be_turned_off_per_host() {
+        let file = ConfigFile::parse(
+            "[update]\ncheck = true\n\n[host.\"build-*\"]\nupdate.check = false\n",
+        )
+        .unwrap();
+
+        let here = resolve(&file, "laptop.example.com", &CliOverrides::default()).unwrap();
+        let builder = resolve(&file, "build-01.example.com", &CliOverrides::default()).unwrap();
+
+        assert!(here.update_check);
+        assert!(!builder.update_check);
+    }
+
+    #[test]
+    fn a_config_that_says_nothing_about_updates_still_checks() {
+        let resolved = resolve(
+            &ConfigFile::default(),
+            "host.example.com",
+            &CliOverrides::default(),
+        )
+        .unwrap();
+
+        assert!(resolved.update_check);
     }
 }

@@ -19,6 +19,16 @@ pub struct Layer {
     pub dotfiles: DotfilesLayer,
     /// Shell settings.
     pub shell: ShellLayer,
+    /// Self-update settings.
+    pub update: UpdateLayer,
+}
+
+/// Self-update settings, all optional at the layer level.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UpdateLayer {
+    /// Whether a normal run checks whether a newer nt has been released.
+    pub check: Option<bool>,
 }
 
 /// Shell settings, all optional at the layer level.
