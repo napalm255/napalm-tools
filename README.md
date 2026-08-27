@@ -12,7 +12,26 @@ nothing, quickly.
 It targets Fedora Workstation, Fedora Server, the official Fedora container
 image, Fedora under WSL, and Bluefin (Fedora atomic). On an atomic host it
 never touches the immutable OS tree. Nothing is sent anywhere: no telemetry,
-and no network access beyond the package managers it drives.
+and no network access beyond the package managers it drives - with one
+exception, a once-a-day check against the GitHub releases API that prints a
+notice and installs nothing. `[update] check = false`, `NT_NO_UPDATE_CHECK=1`,
+`--quiet`, `--output json` and any CI environment each turn it off, and each
+skips the request itself, not merely the printing.
+
+## Install
+
+Download the latest release and put it on your `PATH`:
+
+```bash
+v=$(curl -fsSL https://api.github.com/repos/napalm255/napalm-tools/releases/latest | jq -r .tag_name)
+curl -fsSLO "https://github.com/napalm255/napalm-tools/releases/download/$v/nt-$v-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf "nt-$v-x86_64-unknown-linux-gnu.tar.gz"
+install -Dm755 "nt-$v-x86_64-unknown-linux-gnu/nt" ~/.local/bin/nt
+```
+
+From then on `nt self update` replaces that binary in place, and `nt self
+check` reports whether it is behind. Both refuse a binary another tool owns -
+Homebrew, cargo, mise or the system - and name what to run instead.
 
 ## Quick start
 
@@ -36,6 +55,8 @@ prompt, copy [`config.example.toml`](config.example.toml) to
 | `nt bundles` | The catalog and each bundle's state here; `--detail` for packages and providers |
 | `nt config show` | The fully resolved configuration |
 | `nt config path` | The configuration file path |
+| `nt self check` | Whether a newer nt has been released; changes nothing |
+| `nt self update` | Replace this binary with the latest release |
 | `nt shell-init <shell>` | The line that activates the configured prompt |
 | `nt version` | The version alone, for scripts |
 | `nt completions <shell>` | Completions for bash, zsh or fish |
@@ -49,6 +70,8 @@ Flags appear only where they do something:
 | `--skip <bundle>`, `--only <bundle>` (repeatable) | apply, status, bundles, config show |
 | `--detail` | status, bundles |
 | `--dry-run`, `--upgrade`, `--strict`, `--no-dotfiles`, `--prompt`, `-q` | apply |
+| `--output`, `-v` | self check, self update |
+| `--dry-run`, `--force`, `--version <X.Y.Z>`, `-q` | self update |
 
 `nt version -q` is an error, not a no-op. Bundle and prompt names are
 validated as they are parsed, so completions offer them and a typo fails.
@@ -248,7 +271,8 @@ on an install command.
 
 Environment overrides, for tests and for exercising another platform's code
 path: `NT_CONFIG`, `NT_HOSTNAME`, `NT_OS_RELEASE`, `NT_OSTREE_MARKER`,
-`NT_CONTAINER_MARKER`, `NT_SESSION_DIR`, `NT_TOOL_DIRS`. `NT_FAKE_UID=0` makes
+`NT_CONTAINER_MARKER`, `NT_SESSION_DIR`, `NT_TOOL_DIRS`, `NT_UPDATE_CACHE`,
+`NT_NO_UPDATE_CHECK`. `NT_FAKE_UID=0` makes
 `apply` behave as if run by root, to test the refusal; it can only force root,
 never hide it.
 
@@ -291,17 +315,29 @@ unchanged `main`.
 
 ### Releases
 
-Bump `version` in `Cargo.toml`, commit, then tag and push:
+Versions follow the Conventional Commits on `main`; nothing is tagged by hand.
+release-please keeps a "chore: release X.Y.Z" pull request up to date, bumping
+`Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` - `feat:` a minor, `fix:` a
+patch, `!` a major, held below 1.0.0 until you decide otherwise. Merging that
+pull request tags the release and creates it; the same workflow run then builds
+`nt-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (the binary, shell completions,
+licence and this README) with a `.sha256` beside it and attaches both.
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+The assets are built from release-please's outputs rather than from the tag,
+because a tag pushed with `GITHUB_TOKEN` starts no workflow of its own - a
+tag-triggered job would never run and every release would carry notes and no
+binaries. `just release-assets` builds the same archive locally into `dist/`.
 
-`release.yml` runs the full CI workflow, refuses a tag that does not match
-`Cargo.toml`, builds `nt-v0.2.0-x86_64-unknown-linux-gnu.tar.gz` (the binary,
-shell completions, licence and this README) with a `.sha256` beside it, and
-attaches both to a GitHub Release with notes generated from the commits.
-`just release-assets` builds the same archive locally into `dist/`.
+### Updating
+
+`nt self update` downloads the latest release, verifies its checksum, unpacks
+it, runs the new binary to confirm it works, and only then renames it over the
+old one. Nothing is replaced until every one of those succeeds. Over HTTPS the
+checksum guards against a truncated download rather than against a hostile
+host, since both files come from the same place.
+
+`nt self update --version X.Y.Z` installs a named release, older ones
+included: that is the way back from a bad one.
 
 The decision engine is a pure function: `plan::build` takes resolved
 configuration, a platform and a snapshot and returns actions. `--dry-run`
